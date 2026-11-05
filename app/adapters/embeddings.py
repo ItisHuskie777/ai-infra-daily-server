@@ -19,6 +19,9 @@ logger = logging.get_logger(__name__)
 
 _BGE_M3 = "BAAI/bge-m3"
 _BGE_M3_DIMENSIONS = 1024
+# A batch is padded to its longest text and attention memory grows with the square of
+# that length, so large batches of long posts need gigabytes; eight stays under 2 GB.
+_INFERENCE_BATCH_SIZE = 8
 
 
 class ImplementsEmbeddings(ABC):
@@ -42,7 +45,9 @@ class FastembedEmbeddings(ImplementsEmbeddings):
 
         model = await self._loaded()
         # NOTE: ONNX inference is CPU-bound and synchronous, so it runs in a thread.
-        vectors = await asyncio.to_thread(lambda: list(model.embed(list(texts))))
+        vectors = await asyncio.to_thread(
+            lambda: list(model.embed(list(texts), batch_size=_INFERENCE_BATCH_SIZE))
+        )
 
         return [
             normalise(numpy.asarray(vector, dtype=numpy.float32)) for vector in vectors

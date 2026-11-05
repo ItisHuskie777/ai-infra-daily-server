@@ -17,6 +17,8 @@ x-aid: &aid
   volumes:
     - ./data:/srv/aid/data
   init: true
+  # The embedding model peaks near 3 GB; the cap protects whatever else the host runs.
+  mem_limit: 6g
 
 services:
   api:
