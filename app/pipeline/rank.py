@@ -6,17 +6,23 @@ from pydantic import BaseModel
 from pydantic import Field
 
 from app import logging
+from app import settings
+from app.adapters.embeddings import Vector
 from app.context import AbstractContext
 from app.models import EventWithItems
 from app.models import Interests
 from app.models import RankedEvent
 from app.models import Source
 from app.models import Thread
+from app.models import Topic
+from app.pipeline import recommend
 from app.pipeline.select import engagement_value
 from app.result import OnSuccess
 from app.result import is_error
 
 logger = logging.get_logger(__name__)
+
+_TOPIC_LINES = tuple(recommend.TOPIC_LABELS.items())
 
 _RANK_BATCH_SIZE = 15
 _ITEMS_PER_EVENT_IN_PROMPT = 5
@@ -24,8 +30,14 @@ _SUMMARY_LIMIT = 600
 _RANK_SYSTEM_PROMPT = (
     "You rank AI-news events for one reader. Score how much each event matches the "
     "reader's interest profile, from 0 (irrelevant) to 1 (must read), and give a "
-    "one-sentence rationale."
+    "one-sentence rationale. Use the whole range: most events deserve less than 0.6 "
+    "and only a few per batch more than 0.8. Where the profile is sparse, judge by "
+    "how much the event matters to a practitioner who follows AI models, "
+    "infrastructure and tooling. Also tag each event with one or two topics from the "
+    "list given, using the topic keys exactly."
 )
+_MAX_TOPICS_PER_EVENT = 2
+_TOPIC_VALUES = frozenset(topic.value for topic in Topic)
 _HEURISTIC_BASE = 0.3
 _HEURISTIC_PER_MATCH = 0.15
 _HEURISTIC_PER_EXCLUDED = 0.25
@@ -37,6 +49,8 @@ class _EventScore(BaseModel):
     event_id: str = Field(min_length=1)
     relevance: float = Field(ge=0, le=1)
     rationale: str
+    # NOTE: Plain strings, so one unknown tag does not invalidate the whole sheet.
+    topics: list[str] = Field(default_factory=list)
 
 
 class _ScoreSheet(BaseModel):
@@ -46,6 +60,7 @@ class _ScoreSheet(BaseModel):
 class _Score(BaseModel):
     relevance: float
     rationale: str
+    topics: tuple[Topic, ...] = ()
 
 
 def _describe_list(label: str, values: Sequence[str]) -> str:
@@ -82,6 +97,9 @@ def _build_rank_prompt(
         _describe_list("Blocked sources", interests.blocked_sources),
         f"Technical depth: {interests.technical_depth}",
         "",
+        "Topics (key: meaning):",
+        *(f"  {topic.value}: {label}" for topic, label in _TOPIC_LINES),
+        "",
         "Events:",
         *(_describe_event(event, sources) for event in events),
         "",
@@ -89,6 +107,16 @@ def _build_rank_prompt(
     ]
 
     return "\n".join(lines)
+
+
+def _known_topics(values: Sequence[str]) -> tuple[Topic, ...]:
+    known = dict.fromkeys(
+        Topic(value.strip().lower())
+        for value in values
+        if value.strip().lower() in _TOPIC_VALUES
+    )
+
+    return tuple(known)[:_MAX_TOPICS_PER_EVENT]
 
 
 def _blocked_source_ids(interests: Interests, sources: Sequence[Source]) -> set[str]:
@@ -99,13 +127,6 @@ def _blocked_source_ids(interests: Interests, sources: Sequence[Source]) -> set[
         for source in sources
         if source.id.lower() in blocked or source.name.lower() in blocked
     }
-
-
-def _source_weight(event: EventWithItems, sources: Mapping[str, Source]) -> float:
-    return max(
-        sources[item.source_id].weight if item.source_id in sources else 1.0
-        for item in event.items
-    )
 
 
 def _count_matches(text: str, keywords: Sequence[str]) -> int:
@@ -168,7 +189,11 @@ async def _score_batch(
         return {event.id: _heuristic_score(event, interests) for event in events}
 
     scores = {
-        score.event_id: _Score(relevance=score.relevance, rationale=score.rationale)
+        score.event_id: _Score(
+            relevance=score.relevance,
+            rationale=score.rationale,
+            topics=_known_topics(score.topics),
+        )
         for score in generated.scores
     }
 
@@ -205,15 +230,34 @@ async def _load_threads(
     return threads
 
 
+async def _centroid_vectors(
+    ctx: AbstractContext, events: Sequence[RankedEvent]
+) -> dict[str, Vector]:
+    vectors: dict[str, Vector] = {}
+
+    for event in events:
+        if event.centroid_item_id is None:
+            continue
+
+        vector = await ctx.items.find_embedding(event.centroid_item_id)
+
+        if vector is not None:
+            vectors[event.id] = vector
+
+    return vectors
+
+
 async def rank_events(
     ctx: AbstractContext,
     interests: Interests,
     sources: Sequence[Source],
     events: Sequence[EventWithItems],
 ) -> OnSuccess[list[RankedEvent]]:
-    """Scores events against the interest profile in model batches, weights each score
-    by the strongest source among the event's items and drops events covered only by
-    blocked sources (FR5.1). A model failure degrades to heuristic scores."""
+    """Scores events against the interest profile in model batches, turns each score
+    into a recommendation score (source weight, topic taste, coverage, freshness,
+    substance), holds back repeats of a story already ranked higher and drops events
+    covered only by blocked sources (FR5.1). A model failure degrades to heuristic
+    scores."""
     sources_by_id = {source.id: source for source in sources}
     blocked = _blocked_source_ids(interests, sources)
     eligible = [
@@ -233,14 +277,24 @@ async def rank_events(
         scores.update(await _score_batch(ctx, interests, batch, sources_by_id))
 
     threads = await _load_threads(ctx, eligible)
+    now = ctx.clock.now()
 
     ranked = [
         RankedEvent(
             **event.model_dump(),
-            relevance_score=scores[event.id].relevance
-            * _source_weight(event, sources_by_id),
+            relevance_score=recommend.score(
+                recommend.signals_for(
+                    event,
+                    relevance=scores[event.id].relevance,
+                    topics=scores[event.id].topics,
+                    sources=sources_by_id,
+                    now=now,
+                ),
+                interests,
+            ),
             rationale=scores[event.id].rationale,
             thread=None if event.thread_id is None else threads.get(event.thread_id),
+            topics=scores[event.id].topics,
         )
         for event in eligible
     ]
@@ -253,6 +307,8 @@ async def rank_events(
         )
     )
 
+    pool = ranked[: settings.DIVERSIFY_POOL_SIZE]
+    ranked = recommend.diversify(ranked, await _centroid_vectors(ctx, pool))
     logger.info("Ranked events.", extra={"events": len(events), "ranked": len(ranked)})
 
     return ranked

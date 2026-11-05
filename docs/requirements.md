@@ -53,6 +53,8 @@ top-voted comments.
 - FR5.1 Relevance is scored by an LLM against the owner's interest profile (topics, keywords, followed authors, blocked sources, technical depth).
 - FR5.2 Individual-voice content is scored separately from media so it is not crowded out; the digest guarantees a minimum share (default 30 %) for author posts and comments when available.
 - FR5.3 Comments are selected by engagement (likes/upvotes) and by LLM judgement of whether they add a distinct viewpoint, not just agreement.
+- FR5.4 The ranking model also tags every event with one or two topics from a fixed taxonomy. The final recommendation score is the product of the model's relevance, the strongest source weight, the owner's learned weight for the event's topics, a boost for coverage by several independent sources, a freshness decay and a penalty for events with almost no body text.
+- FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
 
 ### FR6 Summarisation and digest composition
 
@@ -65,6 +67,8 @@ top-voted comments.
 
 - FR7.1 One email per day at the owner's local delivery hour; manual trigger available.
 - FR7.2 Each event in the email has feedback links (more like this / less like this / mute source). Feedback adjusts source weights and interest keywords.
+- FR7.2a "More like this" and "less like this" also move the owner's weight for the event's topics.
+- FR7.2b The foot of each email carries at most two multiple-choice questions: which of the day's topics to see more of, and (alternating by day) whether the digest was too long or too short, or how technical the summaries should be. One tap answers; each question accepts one answer per digest.
 - FR7.3 A chat interface lets the owner change preferences, ask "why was this included", and ask for the history of a thread. Preference changes are made through structured tool calls, not regex.
 
 ## Quality attributes (measurable)

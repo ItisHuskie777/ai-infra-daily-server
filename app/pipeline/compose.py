@@ -14,6 +14,7 @@ from app.models import Model
 from app.models import SourceHealth
 from app.models import StoredItem
 from app.models import Thread
+from app.pipeline.quiz import Quiz
 from app.pipeline.summarise import EventSummary
 
 _DIGEST_NAME = "AI Infra Daily"
@@ -78,6 +79,16 @@ class _EventView(Model):
     key_claims: tuple[str, ...]
     takes: tuple[_TakeView, ...]
     feedback: tuple[_FeedbackLink, ...]
+
+
+class _QuizOptionView(Model):
+    label: str
+    url: str
+
+
+class _QuizView(Model):
+    prompt: str
+    options: tuple[_QuizOptionView, ...]
 
 
 class _SectionView(Model):
@@ -193,6 +204,26 @@ def _subject_for(date: str, title: str | None) -> str:
     return f"{_DIGEST_NAME} — {date} — {title}"
 
 
+def _quiz_view(quiz: Quiz, *, base_url: str, token: str) -> _QuizView:
+    return _QuizView(
+        prompt=quiz.prompt,
+        options=tuple(
+            _QuizOptionView(
+                label=option.label,
+                url=f"{base_url}/quiz?"
+                + urlencode(
+                    {
+                        "token": token,
+                        "question": quiz.question.value,
+                        "answer": option.answer,
+                    }
+                ),
+            )
+            for option in quiz.options
+        ),
+    )
+
+
 def compose_digest_html(
     *,
     date: str,
@@ -201,6 +232,7 @@ def compose_digest_html(
     health: Sequence[SourceHealth],
     feedback_base_url: str,
     feedback_token: str,
+    quizzes: Sequence[Quiz] = (),
 ) -> ComposedDigest:
     ordered = _ordered_sections(sections)
     top_title = ordered[0].events[0].summary.title if ordered else None
@@ -223,6 +255,10 @@ def compose_digest_html(
         date=date,
         style=style.value,
         sections=views,
+        quizzes=[
+            _quiz_view(quiz, base_url=base_url, token=feedback_token)
+            for quiz in quizzes
+        ],
         health_total=len(health),
         health_ok=len(health) - len(failed),
         failed_sources=failed,

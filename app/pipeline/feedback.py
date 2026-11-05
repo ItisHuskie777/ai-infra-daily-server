@@ -4,6 +4,7 @@ from typing import Literal
 from typing import override
 
 from app import logging
+from app import settings
 from app.context import AbstractContext
 from app.models import EventWithItems
 from app.models import Feedback
@@ -11,6 +12,8 @@ from app.models import FeedbackSignal
 from app.models import Interests
 from app.models import Model
 from app.models import Thread
+from app.models import Topic
+from app.pipeline import recommend
 from app.result import OnSuccess
 from app.result import ServiceError
 from app.result import is_error
@@ -119,6 +122,7 @@ class FeedbackOutcome(Model):
 class _Targets(Model):
     source_ids: tuple[str, ...]
     title: str | None
+    topics: tuple[Topic, ...] = ()
 
 
 def extract_keywords(title: str, existing: Sequence[str]) -> list[str]:
@@ -159,6 +163,18 @@ async def _find_event(ctx: AbstractContext, event_id: str) -> OnSuccess[EventWit
     return event
 
 
+async def _placed_topics(ctx: AbstractContext, feedback: Feedback) -> tuple[Topic, ...]:
+    """Topics the ranking gave the event in the digest the feedback came from."""
+    if feedback.digest_id is None:
+        return ()
+
+    for placement in await ctx.digests.list_placements(feedback.digest_id):
+        if placement.event_id == feedback.event_id:
+            return placement.topics
+
+    return ()
+
+
 async def _targets_for(ctx: AbstractContext, feedback: Feedback) -> OnSuccess[_Targets]:
     if feedback.event_id is not None:
         event = await _find_event(ctx, feedback.event_id)
@@ -168,7 +184,11 @@ async def _targets_for(ctx: AbstractContext, feedback: Feedback) -> OnSuccess[_T
 
         source_ids = tuple(dict.fromkeys(item.source_id for item in event.items))
 
-        return _Targets(source_ids=source_ids, title=event.title)
+        return _Targets(
+            source_ids=source_ids,
+            title=event.title,
+            topics=await _placed_topics(ctx, feedback),
+        )
 
     if feedback.source_id is not None:
         return _Targets(source_ids=(feedback.source_id,), title=None)
@@ -241,9 +261,21 @@ async def _apply_preference(
 
     delta = _WEIGHT_STEP_UP if direction == "more" else -_WEIGHT_STEP_DOWN
     changes = await _adjust_weights(ctx, targets.source_ids, delta)
+    step = (
+        settings.TOPIC_WEIGHT_STEP
+        if direction == "more"
+        else -settings.TOPIC_WEIGHT_STEP
+    )
+    preferred = _with_preference(interests, targets.title, direction)
 
     return FeedbackOutcome(
-        interests=_with_preference(interests, targets.title, direction),
+        interests=preferred.model_copy(
+            update={
+                "topic_weights": recommend.adjust_topic_weights(
+                    preferred.topic_weights, targets.topics, step
+                )
+            }
+        ),
         source_weight_changes=tuple(changes),
     )
 

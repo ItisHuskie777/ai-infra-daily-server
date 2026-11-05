@@ -41,6 +41,17 @@ bundles them; `sources` and `pipeline` contain the logic and see only `AbstractC
 `cli` and `api` are the entry points. Expected failures are returned as values
 (`OnSuccess[T]`), never raised.
 
+## Ranking and learning
+
+`app/pipeline/recommend.py` holds the scoring as pure functions. The model scores each
+event against the interest profile and tags it with topics from a fixed list; the
+recommendation score multiplies that relevance by the strongest source weight, the
+owner's weight for the topics, a coverage boost (several independent sources), a
+freshness decay and a penalty for events with next to no text. Repeats of a story
+already ranked higher are held back. Topic weights start neutral and move with the
+per-event feedback links and with the one or two multiple-choice questions at the foot
+of every email (`app/pipeline/quiz.py`); `aid prefs show` prints them.
+
 ## Layout
 
 ```
@@ -53,8 +64,8 @@ app/
   adapters/          http, llm, embeddings, browser, email, clock, database
   repositories/      one class per stored resource; all SQL lives here
   sources/           one adapter per source kind, fetch_all, seeds, registry
-  pipeline/          ingest, embed, cluster, threads, rank, select, summarise,
-                     compose, feedback, feedback_token, schedule, run
+  pipeline/          ingest, embed, cluster, threads, rank, recommend, select,
+                     summarise, compose, quiz, feedback, feedback_token, schedule, run
   api/               FastAPI app, bearer auth, routes
   cli.py             the `aid` command
 migrations/          numbered SQL files applied by `aid migrate`

@@ -21,6 +21,7 @@ from app.pipeline import compose
 from app.pipeline import embed
 from app.pipeline import feedback_token
 from app.pipeline import ingest
+from app.pipeline import quiz
 from app.pipeline import rank
 from app.pipeline import schedule
 from app.pipeline import select
@@ -196,6 +197,7 @@ def _build_digest(
         health=health,
         feedback_base_url=settings.PUBLIC_BASE_URL,
         feedback_token=token,
+        quizzes=quiz.build_quizzes(placements, date=date),
     )
 
     return Digest(

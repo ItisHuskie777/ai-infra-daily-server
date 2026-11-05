@@ -64,6 +64,29 @@ class FeedbackSignal(StrEnum):
     PIN_THREAD = "pin_thread"
 
 
+class Topic(StrEnum):
+    """Fixed taxonomy every event is tagged with; the owner's taste is a weight per
+    topic, learned from feedback and quiz answers."""
+
+    MODELS = "models"
+    INFERENCE = "inference"
+    HARDWARE = "hardware"
+    TRAINING = "training"
+    AGENTS = "agents"
+    TOOLING = "tooling"
+    RESEARCH = "research"
+    OPEN_SOURCE = "open_source"
+    POLICY = "policy"
+    BUSINESS = "business"
+    PRODUCTS = "products"
+
+
+class QuizQuestion(StrEnum):
+    TOPICS = "topics"
+    LENGTH = "length"
+    DEPTH = "depth"
+
+
 class Model(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -210,6 +233,7 @@ class RankedEvent(EventWithItems):
     relevance_score: float
     rationale: str
     thread: Thread | None
+    topics: tuple[Topic, ...] = ()
 
 
 class DigestEventPlacement(Model):
@@ -265,3 +289,5 @@ class Interests(Model):
     preferred_sources: tuple[str, ...] = ()
     blocked_sources: tuple[str, ...] = ()
     technical_depth: TechnicalDepth = TechnicalDepth.PRACTICAL
+    # A missing topic counts as 1.0; above favours it, below holds it back.
+    topic_weights: dict[Topic, float] = Field(default_factory=dict)

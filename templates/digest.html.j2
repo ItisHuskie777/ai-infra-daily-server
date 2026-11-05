@@ -45,6 +45,20 @@
 </div>
 {% endfor %}
 {% endfor %}
+{% if quizzes %}
+<div style="margin:32px 0 0 0;padding:16px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;">
+<h2 style="margin:0 0 4px 0;font-size:18px;line-height:1.3;">Tune tomorrow's digest</h2>
+<p style="margin:0 0 12px 0;font-size:13px;color:#6b7280;">One tap per question; the answer takes effect from the next digest.</p>
+{% for quiz in quizzes %}
+<p style="margin:12px 0 6px 0;font-size:15px;font-weight:bold;">{{ quiz.prompt }}</p>
+<p style="margin:0;font-size:14px;line-height:2.2;">
+{% for option in quiz.options %}
+<a href="{{ option.url }}" style="display:inline-block;margin:0 6px 6px 0;padding:2px 12px;border:1px solid #9ca3af;border-radius:14px;color:#1f2933;text-decoration:none;">{{ option.label }}</a>
+{% endfor %}
+</p>
+{% endfor %}
+</div>
+{% endif %}
 <div style="margin:32px 0 0 0;padding-top:12px;border-top:1px solid #e5e7eb;font-size:13px;color:#6b7280;">
 <h2 style="margin:0 0 12px 0;padding-bottom:6px;border-bottom:2px solid #e5e7eb;font-size:18px;line-height:1.3;">Source health</h2>
 {% if failed_sources %}

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from datetime import timedelta
 from html import escape
 from typing import Annotated
@@ -21,10 +22,12 @@ from app.models import FeedbackSignal
 from app.models import Interests
 from app.models import Model
 from app.models import Profile
+from app.models import QuizQuestion
 from app.models import Source
 from app.models import Thread
 from app.pipeline import feedback
 from app.pipeline import feedback_token
+from app.pipeline import quiz
 from app.pipeline import run
 from app.repositories import StoreError
 from app.result import ServiceError
@@ -35,6 +38,7 @@ logger = logging.get_logger(__name__)
 _DEFAULT_DIGEST_LIMIT = 10
 _MAX_DIGEST_LIMIT = 50
 _SIGNALS = {signal.value for signal in FeedbackSignal}
+_QUESTIONS = {question.value for question in QuizQuestion}
 
 router = APIRouter()
 owner = APIRouter(prefix="/api", dependencies=[Depends(auth.require_owner)])
@@ -234,6 +238,77 @@ async def feedback_link(
     )
 
     return _page("Thanks, noted", "Tomorrow's digest will take this into account.")
+
+
+async def _digest_for_token(
+    ctx: AbstractContext, token: str, *, now: datetime
+) -> str | None:
+    claims = feedback_token.verify(settings.FEEDBACK_SECRET, token, now=now)
+
+    if is_error(claims) or is_error(await ctx.digests.find_by_id(claims.digest_id)):
+        return None
+
+    return claims.digest_id
+
+
+def _quiz_error_page(error: ServiceError) -> HTMLResponse:
+    match error:
+        case quiz.QuizError.ALREADY_ANSWERED:
+            return _page(
+                "Already answered",
+                "This question was answered before; the first answer stands.",
+            )
+        case quiz.QuizError.INVALID:
+            return _page(
+                "Invalid quiz link", "That is not one of the options.", status=400
+            )
+        case _:
+            logger.error("Applying a quiz answer failed.", extra={"error": str(error)})
+
+            return _page(
+                "Something went wrong", "Your answer could not be recorded.", status=500
+            )
+
+
+@router.get("/quiz", response_class=HTMLResponse)
+async def quiz_link(
+    ctx: Ctx, *, token: str = "", question: str = "", answer: str = ""
+) -> HTMLResponse:
+    if token == "" or question not in _QUESTIONS or answer == "":
+        return _page(
+            "Invalid quiz link", "This link is missing required parameters.", status=400
+        )
+
+    now = ctx.clock.now()
+    digest_id = await _digest_for_token(ctx, token, now=now)
+
+    if digest_id is None:
+        return _page(
+            "Invalid quiz link", "This link is invalid or has expired.", status=400
+        )
+
+    profile = await ctx.preferences.profile()
+    interests = await ctx.preferences.interests()
+    outcome = await quiz.apply_answer(
+        ctx,
+        digest_id=digest_id,
+        question=QuizQuestion(question),
+        answer=answer,
+        profile=profile,
+        interests=interests,
+        now=now,
+    )
+
+    if is_error(outcome):
+        return _quiz_error_page(outcome)
+
+    if outcome.profile != profile:
+        await ctx.preferences.save_profile(outcome.profile, now=now)
+
+    if outcome.interests != interests:
+        await ctx.preferences.save_interests(outcome.interests, now=now)
+
+    return _page("Thanks, noted", outcome.message)
 
 
 @owner.get("/sources")

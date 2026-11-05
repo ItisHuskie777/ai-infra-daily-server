@@ -9,7 +9,9 @@ from app.models import Digest
 from app.models import DigestSection
 from app.models import Feedback
 from app.models import Model
+from app.models import QuizQuestion
 from app.models import SourceHealth
+from app.models import Topic
 from app.repositories._common import StoreError
 from app.repositories._common import from_iso
 from app.repositories._common import from_json
@@ -27,6 +29,7 @@ class DigestPlacementRecord(Model):
     relevance_score: float
     rationale: str
     item_ids: tuple[str, ...]
+    topics: tuple[Topic, ...]
 
 
 class DigestRepository:
@@ -54,7 +57,8 @@ class DigestRepository:
         )
         await self._db.execute_many(
             "INSERT INTO digest_events (digest_id, event_id, section, position, "
-            "relevance_score, rationale, item_ids_json) VALUES (?,?,?,?,?,?,?)",
+            "relevance_score, rationale, item_ids_json, topics_json) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             [
                 (
                     digest.id,
@@ -64,6 +68,7 @@ class DigestRepository:
                     placement.event.relevance_score,
                     placement.event.rationale,
                     to_json(list(placement.item_ids)),
+                    to_json([topic.value for topic in placement.event.topics]),
                 )
                 for placement in digest.placements
             ],
@@ -139,6 +144,31 @@ class DigestRepository:
             ),
         )
 
+    async def find_quiz_answer(
+        self, digest_id: str, question: QuizQuestion
+    ) -> str | None:
+        row = await self._db.fetch_one(
+            "SELECT answer FROM quiz_answers WHERE digest_id = ? AND question = ?",
+            (digest_id, question),
+        )
+
+        return None if row is None else str(row["answer"])
+
+    async def record_quiz_answer(
+        self, digest_id: str, question: QuizQuestion, answer: str, *, now: datetime
+    ) -> OnSuccess[None]:
+        """One answer per digest and question; a repeat is a conflict."""
+        if await self.find_quiz_answer(digest_id, question) is not None:
+            return StoreError.CONFLICT
+
+        await self._db.execute(
+            "INSERT INTO quiz_answers (digest_id, question, answer, created_at) "
+            "VALUES (?,?,?,?)",
+            (digest_id, question, answer, to_iso(now)),
+        )
+
+        return None
+
     async def list_feedback_since(self, since: datetime) -> list[Feedback]:
         rows = await self._db.fetch_all(
             "SELECT * FROM feedback WHERE created_at >= ? ORDER BY created_at",
@@ -175,6 +205,15 @@ def _to_digest(row: Row) -> Digest:
     )
 
 
+def _to_topics(value: object) -> tuple[Topic, ...]:
+    known = {topic.value for topic in Topic}
+
+    if not isinstance(value, list):
+        return ()
+
+    return tuple(Topic(str(entry)) for entry in value if str(entry) in known)
+
+
 def _to_placement(row: Row) -> DigestPlacementRecord:
     item_ids = from_json(row["item_ids_json"])
 
@@ -187,4 +226,5 @@ def _to_placement(row: Row) -> DigestPlacementRecord:
         item_ids=tuple(str(value) for value in item_ids)
         if isinstance(item_ids, list)
         else (),
+        topics=_to_topics(from_json(row["topics_json"])),
     )
