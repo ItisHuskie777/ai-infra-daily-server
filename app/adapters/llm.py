@@ -21,6 +21,7 @@ class LlmError(ServiceError):
     RATE_LIMITED = "rate_limited"
     UNAUTHORISED = "unauthorised"
     INVALID_RESPONSE = "invalid_response"
+    NOT_CONFIGURED = "not_configured"
 
     @override
     def service(self) -> str:
@@ -125,7 +126,36 @@ class OpenAiCompatibleLlm(ImplementsLlm):
         return content
 
 
+class UnconfiguredLlm(ImplementsLlm):
+    """Stands in when no API key is set, so commands that never call the model (and the
+    heuristic fallbacks of those that do) still work."""
+
+    __slots__ = ()
+
+    @override
+    async def complete_json[M: pydantic.BaseModel](
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: type[M],
+        temperature: float = 0.2,
+    ) -> OnSuccess[M]:
+        return LlmError.NOT_CONFIGURED
+
+    @override
+    async def complete_text(
+        self, *, system: str, user: str, temperature: float = 0.4
+    ) -> OnSuccess[str]:
+        return LlmError.NOT_CONFIGURED
+
+
 def default() -> ImplementsLlm:
+    if settings.DEEPSEEK_API_KEY == "":
+        logger.warning("No LLM API key configured; model calls will fail.")
+
+        return UnconfiguredLlm()
+
     client = openai.AsyncOpenAI(
         api_key=settings.DEEPSEEK_API_KEY,
         base_url=settings.DEEPSEEK_BASE_URL,

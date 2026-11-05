@@ -85,8 +85,7 @@ class RedditConfig(Model):
     kind: Literal["reddit"] = "reddit"
     subreddit: str
     sort: Literal["hot", "top", "new"]
-    min_score: int = Field(ge=0)
-    comment_limit: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
 
 
 class BlueskyConfig(Model):

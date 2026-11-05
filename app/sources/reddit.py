@@ -1,15 +1,14 @@
 import asyncio
-import html
-from datetime import UTC
+import re
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from typing import override
 
-import pydantic
-
 from app import logging
+from app.adapters.http import HttpResponse
 from app.context import AbstractContext
-from app.models import Comment
-from app.models import Engagement
 from app.models import ItemKind
 from app.models import RedditConfig
 from app.models import Source
@@ -18,166 +17,58 @@ from app.models import SourceKind
 from app.result import OnSuccess
 from app.result import is_error
 from app.sources import normalise
+from app.sources import rss
 from app.sources._common import FetchError
 from app.sources._common import ImplementsSourceAdapter
+
+type Sleep = Callable[[float], Awaitable[None]]
 
 logger = logging.get_logger(__name__)
 
 _REDDIT_BASE = "https://www.reddit.com"
-_LISTING_LIMIT = 40
-_COMMENT_FETCH_CONCURRENCY = 4
-_PLACEHOLDER_BODIES = frozenset({"[deleted]", "[removed]"})
+_TOO_MANY_REQUESTS = 429
+_MAX_WAIT_SECONDS = 120.0
+_AUTHOR_PREFIX = "/u/"
+_LINK_ANCHOR = re.compile(r'<a href="([^"]+)">\[link\]</a>')
+_FOOTER = re.compile(r"\s*submitted by\s+/u/\S+\s*\[link\]\s*\[comments\]\s*$")
 
 
-class _Post(pydantic.BaseModel):
-    id: str
-    title: str
-    url: str | None = None
-    permalink: str
-    author: str | None = None
-    score: int | None = None
-    num_comments: int | None = None
-    created_utc: float | None = None
-    selftext: str | None = None
-    is_self: bool | None = None
-    link_flair_text: str | None = None
-
-
-class _Child(pydantic.BaseModel):
-    kind: str
-    data: dict[str, object]
-
-
-class _ListingData(pydantic.BaseModel):
-    children: list[_Child]
-
-
-class _Listing(pydantic.BaseModel):
-    data: _ListingData
-
-
-class _CommentData(pydantic.BaseModel):
-    id: str
-    author: str | None = None
-    body: str | None = None
-    score: int | None = None
-    permalink: str | None = None
-
-
-_COMMENT_THREAD = pydantic.TypeAdapter(list[_Listing])
-
-
-def _permalink_url(permalink: str) -> str:
-    return f"{_REDDIT_BASE}{permalink}"
-
-
-def _epoch_to_datetime(seconds: float | None, fallback: datetime) -> datetime:
-    if seconds is None:
-        return fallback
-
-    return datetime.fromtimestamp(seconds, tz=UTC)
-
-
-def _to_comment(data: dict[str, object]) -> Comment | None:
+def _header_number(response: HttpResponse, name: str) -> float | None:
     try:
-        comment = _CommentData.model_validate(data)
-    except pydantic.ValidationError:
-        return None
-
-    text = html.unescape(comment.body or "").strip()
-
-    if text == "" or text in _PLACEHOLDER_BODIES:
-        return None
-
-    return Comment(
-        id=comment.id,
-        author=comment.author,
-        text=text,
-        score=comment.score,
-        url=None if comment.permalink is None else _permalink_url(comment.permalink),
-    )
-
-
-def _to_post(child: _Child) -> _Post | None:
-    if child.kind != "t3":
-        return None
-
-    try:
-        return _Post.model_validate(child.data)
-    except pydantic.ValidationError:
+        return float(response.headers[name])
+    except KeyError, ValueError:
         return None
 
 
-async def _fetch_top_comments(
-    ctx: AbstractContext, post_id: str, limit: int
-) -> list[Comment]:
-    if limit == 0:
-        return []
+def _linked_url(content: str, discussion_url: str) -> str | None:
+    """The page a link post points at; self posts link back to their own thread."""
+    match = _LINK_ANCHOR.search(content)
 
-    response = await ctx.http.get(
-        f"{_REDDIT_BASE}/comments/{post_id}.json?limit={limit}&sort=top"
-    )
+    if match is None:
+        return None
 
-    if is_error(response) or not response.ok:
-        logger.warning("Failed to fetch Reddit comments.", extra={"post": post_id})
+    linked = normalise.strip_html(match.group(1))
 
-        return []
-
-    try:
-        listings = _COMMENT_THREAD.validate_json(response.body)
-    except pydantic.ValidationError:
-        listings = []
-
-    if len(listings) < 2:
-        logger.warning("Unexpected Reddit comment payload.", extra={"post": post_id})
-
-        return []
-
-    comments = [
-        comment
-        for comment in (
-            _to_comment(child.data)
-            for child in listings[1].data.children
-            if child.kind == "t1"
-        )
-        if comment is not None
-    ]
-    comments.sort(key=lambda comment: comment.score or 0, reverse=True)
-
-    return comments[:limit]
+    return None if linked.rstrip("/") == discussion_url.rstrip("/") else linked
 
 
-async def _build_post(
-    ctx: AbstractContext,
-    source: Source,
-    config: RedditConfig,
-    post: _Post,
-    semaphore: asyncio.Semaphore,
-) -> OnSuccess[SourceItem]:
-    async with semaphore:
-        comments = await _fetch_top_comments(ctx, post.id, config.comment_limit)
-
-    discussion_url = _permalink_url(post.permalink)
-    is_link_post = post.is_self is not True and post.url is not None
-    flair = post.link_flair_text
-
-    return normalise.build_item(
-        source_id=source.id,
-        kind=ItemKind.DISCUSSION,
-        url=discussion_url,
-        canonical_source=(post.url or discussion_url) if is_link_post else None,
-        title=html.unescape(post.title),
-        author=post.author,
-        text=html.unescape(post.selftext or "").strip(),
-        published_at=_epoch_to_datetime(post.created_utc, ctx.clock.now()),
-        language_hint=source.language,
-        engagement=Engagement(score=post.score or 0, comments=post.num_comments or 0),
-        comments=comments,
-        tags=() if flair is None else (flair,),
-    )
+def _author(raw: str | None) -> str | None:
+    return None if raw is None else raw.removeprefix(_AUTHOR_PREFIX)
 
 
 class RedditAdapter(ImplementsSourceAdapter):
+    """Reads a subreddit's public Atom feed. Reddit refuses anonymous JSON requests and
+    allows roughly one feed request a minute, so requests are serialised and each waits
+    out the window the previous response announced. The feed carries neither scores
+    nor comments; the listing order (`top` of the day) stands in for the score."""
+
+    __slots__ = ("_lock", "_ready_at", "_sleep")
+
+    def __init__(self, *, sleep: Sleep = asyncio.sleep) -> None:
+        self._sleep = sleep
+        self._lock = asyncio.Lock()
+        self._ready_at: datetime | None = None
+
     @property
     @override
     def kind(self) -> SourceKind:
@@ -198,32 +89,39 @@ class RedditAdapter(ImplementsSourceAdapter):
             return FetchError.UNSUPPORTED
 
         config = source.config
-        listing_url = (
-            f"{_REDDIT_BASE}/r/{config.subreddit}/{config.sort}.json"
-            f"?limit={_LISTING_LIMIT}&t=day"
+        response = await self._get(
+            ctx,
+            f"{_REDDIT_BASE}/r/{config.subreddit}/{config.sort}/.rss"
+            f"?t=day&limit={config.limit}",
         )
-        response = await ctx.http.get(listing_url)
 
         if is_error(response) or not response.ok:
             return FetchError.FETCH_FAILED
 
-        try:
-            listing = _Listing.model_validate_json(response.body)
-        except pydantic.ValidationError:
-            return FetchError.PARSE_FAILED
+        entries = rss.parse_feed(response.body)
 
-        posts = [
-            post
-            for post in (_to_post(child) for child in listing.data.children)
-            if post is not None and (post.score or 0) >= config.min_score
-        ]
-        semaphore = asyncio.Semaphore(_COMMENT_FETCH_CONCURRENCY)
-        built = await asyncio.gather(
-            *(_build_post(ctx, source, config, post, semaphore) for post in posts)
-        )
+        if is_error(entries):
+            return entries
+
+        now = ctx.clock.now()
         items: list[SourceItem] = []
 
-        for item in built:
+        for entry in entries:
+            if entry.link is None:
+                continue
+
+            item = normalise.build_item(
+                source_id=source.id,
+                kind=ItemKind.DISCUSSION,
+                url=entry.link,
+                canonical_source=_linked_url(entry.content, entry.link),
+                title=normalise.strip_html(entry.title),
+                author=_author(entry.author),
+                text=_FOOTER.sub("", normalise.strip_html(entry.content)),
+                published_at=normalise.parse_datetime(entry.published, fallback=now),
+                language_hint=source.language,
+            )
+
             if is_error(item):
                 logger.debug(
                     "Skipped invalid Reddit post.",
@@ -235,3 +133,46 @@ class RedditAdapter(ImplementsSourceAdapter):
             items.append(item)
 
         return items
+
+    async def _get(self, ctx: AbstractContext, url: str) -> OnSuccess[HttpResponse]:
+        async with self._lock:
+            await self._wait_for_window(ctx)
+            response = await ctx.http.get(url)
+
+            if is_error(response):
+                return response
+
+            self._note_window(ctx, response)
+
+            if response.status != _TOO_MANY_REQUESTS:
+                return response
+
+            logger.info("Reddit rate limit reached; retrying once.", extra={"url": url})
+            await self._wait_for_window(ctx)
+            retried = await ctx.http.get(url)
+
+            if not is_error(retried):
+                self._note_window(ctx, retried)
+
+            return retried
+
+    async def _wait_for_window(self, ctx: AbstractContext) -> None:
+        if self._ready_at is None:
+            return
+
+        delay = (self._ready_at - ctx.clock.now()).total_seconds()
+
+        if delay > 0:
+            await self._sleep(delay)
+
+    def _note_window(self, ctx: AbstractContext, response: HttpResponse) -> None:
+        remaining = _header_number(response, "x-ratelimit-remaining")
+        reset = _header_number(response, "x-ratelimit-reset")
+
+        if remaining is None or reset is None or remaining >= 1:
+            self._ready_at = None
+
+            return
+
+        wait = min(max(reset, 0.0), _MAX_WAIT_SECONDS) + 1.0
+        self._ready_at = ctx.clock.now() + timedelta(seconds=wait)

@@ -20,7 +20,7 @@ _CATEGORY_WEIGHTS: dict[SourceCategory, float] = {
     SourceCategory.PAPER: 0.8,
 }
 _HN_COMMENT_LIMIT = 5
-_REDDIT_COMMENT_LIMIT = 5
+_REDDIT_POST_LIMIT = 15
 
 
 def _seed(
@@ -68,7 +68,7 @@ def _hn_search(id: str, query: str, min_points: int) -> Source:
     )
 
 
-def _reddit(subreddit: str, min_score: int) -> Source:
+def _reddit(subreddit: str) -> Source:
     return _seed(
         f"reddit-{subreddit.lower()}",
         f"r/{subreddit}",
@@ -76,8 +76,7 @@ def _reddit(subreddit: str, min_score: int) -> Source:
         RedditConfig(
             subreddit=subreddit,
             sort="top",
-            min_score=min_score,
-            comment_limit=_REDDIT_COMMENT_LIMIT,
+            limit=_REDDIT_POST_LIMIT,
         ),
     )
 
@@ -120,10 +119,10 @@ _VENDOR_SOURCES: tuple[Source, ...] = (
         "https://blog.google/technology/ai/rss/",
     ),
     _rss(
-        "meta-ai-blog",
-        "Meta AI Blog",
+        "meta-ai-research",
+        "Engineering at Meta: AI Research",
         SourceCategory.VENDOR,
-        "https://ai.meta.com/blog/rss/",
+        "https://engineering.fb.com/category/ai-research/feed/",
     ),
     _rss(
         "nvidia-technical-blog",
@@ -153,7 +152,7 @@ _VENDOR_SOURCES: tuple[Source, ...] = (
         "mistral-news",
         "Mistral AI News",
         SourceCategory.VENDOR,
-        "https://mistral.ai/feed.xml",
+        "https://mistral.ai/rss.xml",
     ),
 )
 
@@ -183,10 +182,17 @@ _MEDIA_SOURCES: tuple[Source, ...] = (
         "https://techcrunch.com/category/artificial-intelligence/feed/",
     ),
     _rss(
-        "jiqizhixin",
-        "机器之心",
+        "infoq-cn",
+        "InfoQ 中文",
         SourceCategory.MEDIA,
-        "https://www.jiqizhixin.com/rss",
+        "https://www.infoq.cn/feed",
+        language=Language.ZH,
+    ),
+    _rss(
+        "zhidx",
+        "智东西",
+        SourceCategory.MEDIA,
+        "https://zhidx.com/rss",
         language=Language.ZH,
     ),
     _rss(
@@ -235,8 +241,8 @@ _COMMUNITY_SOURCES: tuple[Source, ...] = (
     _hn_search("hn-search-llm", "LLM", 50),
     _hn_search("hn-search-gpu", "GPU", 50),
     _hn_search("hn-search-inference", "inference", 50),
-    _reddit("MachineLearning", 50),
-    _reddit("LocalLLaMA", 100),
+    _reddit("MachineLearning"),
+    _reddit("LocalLLaMA"),
 )
 
 _AUTHOR_SOURCES: tuple[Source, ...] = (
@@ -256,7 +262,7 @@ _AUTHOR_SOURCES: tuple[Source, ...] = (
         "the-batch",
         "The Batch",
         SourceCategory.AUTHOR,
-        "https://www.deeplearning.ai/the-batch/feed/",
+        "https://charonhub.deeplearning.ai/rss/",
     ),
     _rss(
         "latent-space",
@@ -292,18 +298,16 @@ _AUTHOR_SOURCES: tuple[Source, ...] = (
     _bluesky("bsky-karpathy", "Andrej Karpathy (Bluesky)", "karpathy.bsky.social"),
     _bluesky("bsky-swyx", "swyx (Bluesky)", "swyx.io"),
     _bluesky("bsky-natolambert", "Nathan Lambert (Bluesky)", "natolambert.bsky.social"),
-    _bluesky("bsky-ylecun", "Yann LeCun (Bluesky)", "ylecun.bsky.social"),
+    _bluesky("bsky-ylecun", "Yann LeCun (Bluesky)", "yann-lecun.bsky.social"),
     _bluesky("bsky-emollick", "Ethan Mollick (Bluesky)", "emollick.bsky.social"),
-    _bluesky(
-        "bsky-jeremyphoward", "Jeremy Howard (Bluesky)", "jeremyphoward.bsky.social"
-    ),
+    _bluesky("bsky-jeremyphoward", "Jeremy Howard (Bluesky)", "howard.fm"),
     _bluesky("bsky-hardmaru", "David Ha (Bluesky)", "hardmaru.bsky.social"),
     _bluesky(
-        "bsky-sebastianraschka", "Sebastian Raschka (Bluesky)", "sebastianraschka.com"
+        "bsky-sebastianraschka", "Sebastian Raschka (Bluesky)", "rasbt.bsky.social"
     ),
     # NOTE: Channel ids come from the channels' public pages; a wrong id surfaces as a
     # failed source.
-    _youtube("yt-karpathy", "Andrej Karpathy (YouTube)", "UCXUPKJO5MZQN11PqgIvCuvQ"),
+    _youtube("yt-karpathy", "Andrej Karpathy (YouTube)", "UCXUPKJO5MZQN11PqgIvyuvQ"),
     _youtube(
         "yt-yannic-kilcher", "Yannic Kilcher (YouTube)", "UCZHmQk67mSJgfCCTn7xBfew"
     ),
