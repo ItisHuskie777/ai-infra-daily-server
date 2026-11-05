@@ -157,6 +157,26 @@ async def health() -> HealthResponse:
     return HealthResponse(ok=True, service="ai-infra-daily")
 
 
+async def _feedback_targets_exist(
+    ctx: AbstractContext,
+    digest_id: str,
+    event_id: str | None,
+    source_id: str | None,
+    item_id: str | None,
+) -> bool:
+    """The feedback table has foreign keys, so unknown ids are rejected up front."""
+    if is_error(await ctx.digests.find_by_id(digest_id)):
+        return False
+
+    if event_id is not None and is_error(await ctx.events.find_by_id(event_id)):
+        return False
+
+    if source_id is not None and is_error(await ctx.sources.find_by_id(source_id)):
+        return False
+
+    return item_id is None or len(await ctx.items.find_by_ids([item_id])) == 1
+
+
 @router.get("/feedback", response_class=HTMLResponse)
 async def feedback_link(
     ctx: Ctx,
@@ -180,6 +200,11 @@ async def feedback_link(
     if is_error(claims):
         return _page(
             "Invalid feedback link", "This link is invalid or has expired.", status=400
+        )
+
+    if not await _feedback_targets_exist(ctx, claims.digest_id, event, source, item):
+        return _page(
+            "Invalid feedback link", "This link points at unknown content.", status=400
         )
 
     received = Feedback(

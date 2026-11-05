@@ -19,6 +19,7 @@ _JSON_ATTEMPTS = 2
 class LlmError(ServiceError):
     NETWORK = "network"
     RATE_LIMITED = "rate_limited"
+    UNAUTHORISED = "unauthorised"
     INVALID_RESPONSE = "invalid_response"
 
     @override
@@ -107,6 +108,10 @@ class OpenAiCompatibleLlm(ImplementsLlm):
             logger.warning("LLM rate limited.")
 
             return LlmError.RATE_LIMITED
+        except openai.AuthenticationError:
+            logger.error("LLM rejected the API key.")
+
+            return LlmError.UNAUTHORISED
         except openai.APIError:
             logger.exception("LLM request failed.")
 
