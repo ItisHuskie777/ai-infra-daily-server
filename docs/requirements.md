@@ -26,7 +26,7 @@ top-voted comments.
 
 - FR1.1 Ingest from mainstream outlets and vendor blogs via RSS/Atom (OpenAI, Anthropic, Google DeepMind, Meta AI, NVIDIA, Hugging Face, Cloudflare, arXiv cs.AI/cs.LG/cs.DC, The Verge AI, MIT Tech Review AI, etc.).
 - FR1.2 Ingest posts from **followed individual accounts** on social platforms: Xiaohongshu (RedNote), X/Twitter, Bluesky, WeChat Official Accounts (公众号), Zhihu, Bilibili, YouTube, Substack newsletters, personal blogs.
-- FR1.3 Ingest community discussion: Hacker News (stories + top comments), Reddit (r/MachineLearning, r/LocalLLaMA, top comments), Xiaohongshu top comments on followed posts.
+- FR1.3 Ingest community discussion: Hacker News (stories + top comments), Reddit (r/MachineLearning, r/LocalLLaMA; top posts; the public feed carries no comments), Xiaohongshu top comments on followed posts.
 - FR1.4 Sources are configuration, not code: each source has a type (rss, json-api, bridge), an identifier, an enabled flag, a weight and a category (media, vendor, author, community). The owner can add, disable or reweight a source without a deploy.
 - FR1.5 A failing source is skipped and reported in the digest footer; it never aborts the run.
 
@@ -88,7 +88,7 @@ top-voted comments.
 | ------------------------------------ | ------------------------------------------------------------------------- | -------------- | -------------------------------------------------------------- |
 | Vendor blogs, media, arXiv, Substack | RSS/Atom                                                                  | Easy           | Direct fetch                                                   |
 | Hacker News + comments               | Algolia API / Firebase API                                                | Easy           | Public, no key                                                 |
-| Reddit + comments                    | `.json` endpoints / OAuth API                                             | Easy–medium    | Needs a free app id; rate-limited                              |
+| Reddit                               | Public Atom feed (posts only); OAuth API for scores and comments          | Easy–medium    | Anonymous JSON is refused; comments need a free app id         |
 | Bluesky                              | AT Protocol public API                                                    | Easy           | Public feeds, no key                                           |
 | YouTube channels                     | RSS feed per channel + transcript API                                     | Easy–medium    | Transcripts need a helper                                      |
 | X / Twitter                          | Official API (paid, USD 100+/month) or RSSHub route with logged-in cookie | Medium–fragile | Scraping breaks ToS; use a throwaway account                   |

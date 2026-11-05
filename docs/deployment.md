@@ -1,8 +1,9 @@
 # Deployment
 
-One small Linux server (1 vCPU, 2 GB RAM is enough; the embedding model needs about
-1 GB of RAM while a run is in progress). Everything runs in Docker; the host only
-needs Docker, systemd and Caddy.
+One Linux server with Docker. Two long-running containers do everything: `api` serves
+the feedback links and the owner API, `scheduler` runs the pipeline at the top of every
+hour. Plan for 4 GB of free RAM (the `BAAI/bge-m3` embedding model uses about 3 GB
+while a run embeds new items) and 6 GB of disk (image 2.8 GB, model 2.2 GB).
 
 ## 1. Install Docker
 
@@ -15,100 +16,72 @@ docker compose version             # Compose v2 is bundled with Docker
 ## 2. Clone and configure
 
 ```bash
-sudo mkdir -p /opt/ai-infra-daily && sudo chown "$USER" /opt/ai-infra-daily
-git clone <repository-url> /opt/ai-infra-daily
-cd /opt/ai-infra-daily
-cp .env.example .env
+git clone <repository-url> ~/ai-infra-daily-server
+cd ~/ai-infra-daily-server
+cp .env.example .env && chmod 600 .env
 ```
 
-Edit `.env`. Every variable without a default is required; the process refuses to start
-when one is missing. The ones that matter on a server:
+Edit `.env`. Every variable without a default must be present; the ones that matter:
 
 | Variable | Value |
 | --- | --- |
-| `DEEPSEEK_API_KEY` | DeepSeek API key (summaries and ranking) |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (ranking and summaries). Empty: no digest can be written |
 | `OWNER_EMAIL`, `RESEND_API_KEY`, `EMAIL_FROM` | Where the digest goes and how it is sent |
 | `TIMEZONE`, `DELIVERY_HOUR` | Owner's timezone and the local hour to send at |
-| `PUBLIC_BASE_URL` | `https://<your-domain>`; feedback links in the email point here |
+| `PUBLIC_BASE_URL` | Public address of the API; feedback links in the email point here |
+| `API_PUBLISH` | Host address Docker publishes the API on, e.g. `0.0.0.0:8787`; default `127.0.0.1:8000` |
 | `OWNER_TOKEN` | A long random string; bearer token for the owner API |
 | `FEEDBACK_SECRET` | A long random string; signs the feedback links |
 | `XIAOHONGSHU_COOKIE`, `X_COOKIE` | Logged-in cookie headers; empty switches those sources off |
 
 Generate secrets with `openssl rand -hex 32`. `DATABASE_PATH`, `API_HOST` and `API_PORT`
-are set by `deploy/compose.yaml` and can stay at their example values.
+are overridden by `compose.yaml` inside the containers.
+
+`OWNER_EMAIL`, `TIMEZONE`, `DELIVERY_HOUR` and `DIGEST_STYLE` only seed the profile: once
+a digest has been sent the profile lives in the database, and `aid prefs` or
+`PUT /api/preferences` changes it.
 
 The SQLite database, the downloaded embedding model and dry-run previews live in
-`./data`, which Compose mounts into both containers. Back up that directory.
+`./data`, which Compose mounts into every container. Back up that directory.
 
-## 3. Build and initialise
-
-```bash
-docker compose -f deploy/compose.yaml build
-docker compose -f deploy/compose.yaml run --rm digest aid migrate
-docker compose -f deploy/compose.yaml run --rm digest aid seed
-docker compose -f deploy/compose.yaml run --rm digest aid sources list
-```
-
-The first build installs Chromium for the browser-rendered sources, so it takes a few
-minutes. `aid seed` inserts the default sources once; later edits through the CLI or
-the API are never overwritten.
-
-## 4. First run
+## 3. Build and first run
 
 ```bash
-docker compose -f deploy/compose.yaml run --rm digest aid run --force --dry-run
+docker compose build
+docker compose run --rm aid aid migrate
+docker compose run --rm aid aid seed
+docker compose run --rm aid aid run --force --dry-run
 ```
 
-`--force` ignores the delivery hour and `--dry-run` writes the digest to
+The first build installs Chromium for the browser-rendered sources and takes a few
+minutes. `--force` ignores the delivery hour and `--dry-run` writes the digest to
 `data/digest-<date>.html` instead of emailing it. The first run downloads the embedding
-model (about 2 GB for `BAAI/bge-m3`) into `data/models`. Open the HTML file, and when it
-looks right send a real one:
+model into `data/models`. When the preview looks right, send a real one:
 
 ```bash
-docker compose -f deploy/compose.yaml run --rm digest aid run --force
-docker compose -f deploy/compose.yaml run --rm digest aid digests list
+docker compose run --rm aid aid run --force
+docker compose run --rm aid aid digests list
 ```
 
-## 5. Schedule the hourly run
+Each stage can also be run on its own, which is the quickest way to see where a run
+stops: `aid stage fetch`, `aid stage embed`, `aid stage cluster`, `aid stage threads`.
+
+## 4. Start the services
 
 ```bash
-sudo cp deploy/aid-digest.service deploy/aid-digest.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now aid-digest.timer
-systemctl list-timers aid-digest.timer
-journalctl -u aid-digest.service -n 50 --no-pager
+docker compose up -d
+docker compose ps
+docker compose logs -f scheduler
+curl http://127.0.0.1:8787/api/health      # the port from API_PUBLISH
 ```
 
-The timer fires every hour. `aid run` compares the current hour in the owner's timezone
-with `DELIVERY_HOUR` and the date of the last digest, so it sends at most one digest per
-local day and exits at once otherwise. Change the hour with `aid prefs set-hour 7`; no
-restart is needed.
+Both containers restart with Docker after a reboot. The scheduler wakes at the top of
+every hour; `aid run` compares the current hour in the owner's timezone with the
+delivery hour and the date of the last digest, so it sends at most one digest per local
+day and exits at once otherwise. Change the hour with
+`docker compose run --rm aid aid prefs set-hour 7`; no restart is needed.
 
-## 6. The HTTP API behind Caddy
-
-The API serves the feedback links in every email and the owner endpoints (sources,
-preferences, digests, manual runs). It listens on `127.0.0.1:8000` only; Caddy
-terminates HTTPS in front of it.
-
-```bash
-sudo cp deploy/aid-api.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now aid-api.service
-curl http://127.0.0.1:8000/api/health
-```
-
-Install Caddy (<https://caddyserver.com/docs/install>), point your domain's DNS at the
-server, then:
-
-```bash
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-sudo sed -i 's/aid.example.com/<your-domain>/' /etc/caddy/Caddyfile
-sudo systemctl reload caddy
-curl https://<your-domain>/api/health
-curl -H "Authorization: Bearer $OWNER_TOKEN" https://<your-domain>/api/sources
-```
-
-Owner endpoints (all need the bearer token):
+Owner endpoints (all need `Authorization: Bearer $OWNER_TOKEN`):
 
 | Method and path | Purpose |
 | --- | --- |
@@ -118,7 +91,28 @@ Owner endpoints (all need the bearer token):
 | `GET /api/preferences`, `PUT /api/preferences` | Profile and interests; PUT takes `{"profile": ..., "interests": ...}` |
 | `POST /api/runs` | `{"force": true, "dry_run": false}` starts a run in the background and returns its id |
 
-## 7. Cookie refresh
+## 5. HTTPS (optional)
+
+Published directly, the API speaks plain HTTP: feedback links work, but the owner token
+would cross the network unencrypted, so call the owner endpoints from the server itself
+or put a reverse proxy in front. With a domain pointing at the server, leave
+`API_PUBLISH` at its loopback default, install Caddy
+(<https://caddyserver.com/docs/install>) and use `deploy/Caddyfile`:
+
+```bash
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+sudo sed -i 's/aid.example.com/<your-domain>/' /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Then set `PUBLIC_BASE_URL=https://<your-domain>` and `docker compose up -d`.
+
+`deploy/aid-digest.timer`, `deploy/aid-digest.service` and `deploy/aid-api.service` are
+systemd equivalents of the two Compose services for hosts that prefer systemd to own
+the schedule; use them instead of `docker compose up -d`, never together with the
+scheduler container.
+
+## 6. Cookie refresh
 
 Xiaohongshu and X are fetched with a logged-in browser session. Cookies expire every few
 weeks; when `aid sources list` shows those sources failing with `blocked` or
@@ -128,30 +122,33 @@ weeks; when `aid sources list` shows those sources failing with `blocked` or
    `Cookie` request header of any request to the site (see `docs/xiaohongshu.md` and
    `docs/x.md` for which cookies matter).
 2. Paste it into `.env` as `XIAOHONGSHU_COOKIE=...` or `X_COOKIE=...` on one line.
-3. Restart the API so it picks up the new value; the timer reads `.env` on every run.
+3. Recreate the containers so they read the new value, enable the source and check it:
 
 ```bash
-sudo systemctl restart aid-api.service
-docker compose -f deploy/compose.yaml run --rm digest aid stage fetch
+docker compose up -d
+docker compose run --rm aid aid sources enable xiaohongshu-following
+docker compose run --rm aid aid stage fetch
 ```
 
-## 8. Updating
+## 7. Updating
 
 ```bash
-cd /opt/ai-infra-daily
+cd ~/ai-infra-daily-server
 git pull
-docker compose -f deploy/compose.yaml build
-docker compose -f deploy/compose.yaml run --rm digest aid migrate
-sudo systemctl restart aid-api.service
+docker compose build
+docker compose run --rm aid aid migrate
+docker compose up -d
 ```
 
 ## Troubleshooting
 
-- `aid run` prints `outside delivery hour` or `already sent today`: expected outside
-  the delivery hour; use `--force` to run anyway.
+- `aid run` prints `not_delivery_hour` or `already_sent_today`: expected outside the
+  delivery hour; use `--force` to run anyway.
+- `every event summary failed`: the LLM is unreachable or `DEEPSEEK_API_KEY` is empty
+  or wrong; nothing is sent.
 - `delivery failed: not_configured`: `RESEND_API_KEY` is empty.
 - A source keeps failing: it is reported in the digest footer and never stops the run
   (`aid sources disable <id>` silences it).
-- Logs are JSON lines on stderr: `journalctl -u aid-digest.service` for runs,
-  `docker compose -f deploy/compose.yaml logs api` for the API. Every line of a run
-  carries its `run_id`; the `runs` table records the last stage reached.
+- Logs are JSON lines on stderr: `docker compose logs scheduler` for runs,
+  `docker compose logs api` for the API. Every line of a run carries its `run_id`; the
+  `runs` table records the last stage reached.

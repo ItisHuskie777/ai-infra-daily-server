@@ -8,9 +8,9 @@ Requires=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/opt/ai-infra-daily
-ExecStart=/usr/bin/docker compose -f deploy/compose.yaml up -d api
-ExecStop=/usr/bin/docker compose -f deploy/compose.yaml stop api
+WorkingDirectory=/opt/ai-infra-daily-server
+ExecStart=/usr/bin/docker compose up -d api
+ExecStop=/usr/bin/docker compose stop api
 
 [Install]
 WantedBy=multi-user.target

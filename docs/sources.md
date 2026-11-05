@@ -1,25 +1,36 @@
 # Seeded sources
 
-`app/sources/seeds.py` seeds 48 sources on first run (`aid seed`); the owner edits them with
+`app/sources/seeds.py` seeds 49 sources on first run (`aid seed`); the owner edits them with
 `aid sources` or `PATCH /api/sources/{id}` afterwards, and `aid seed` never overwrites edits.
 
 ## Live audit, 2026-11-05
 
-36 of the 46 enabled seeds returned items (774 unique items in one fetch). The following seeds
-failed for data reasons and need a replacement URL or handle from the owner:
+All 47 enabled seeds returned items, both from a residential connection and from the
+production server (946 unique items in one fetch). The two remaining seeds, Xiaohongshu
+and X, stay disabled until a cookie is configured; see [xiaohongshu.md](xiaohongshu.md)
+and [x.md](x.md).
 
-| Source id               | Problem                                            |
-| ----------------------- | -------------------------------------------------- |
-| `bsky-sebastianraschka` | Bluesky "Profile not found" (wrong handle)         |
-| `bsky-ylecun`           | Bluesky "Profile not found" (wrong handle)         |
-| `meta-ai-blog`          | HTTP 404                                           |
-| `mistral-news`          | HTTP 404                                           |
-| `the-batch`             | HTTP 404                                           |
-| `yt-karpathy`           | HTTP 404 (channel id)                              |
-| `jiqizhixin`            | Returns an HTML page, not a feed                   |
-| `reddit-machinelearning`| HTTP 403 for the project user agent                |
-| `reddit-localllama`     | HTTP 403 for the project user agent                |
-| `bsky-jeremyphoward`    | Works but returned no original posts (reposts only)|
+An earlier audit the same day found ten broken seeds. What replaced them:
 
-The Xiaohongshu and X seeds are disabled until a cookie is configured; see
-[xiaohongshu.md](xiaohongshu.md) and [x.md](x.md).
+| Source id                | Was                                   | Now                                                  |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------- |
+| `bsky-sebastianraschka`  | Profile not found                     | Handle `rasbt.bsky.social`                           |
+| `bsky-ylecun`            | Profile not found                     | Handle `yann-lecun.bsky.social`                      |
+| `bsky-jeremyphoward`     | Stale handle, reposts only            | Handle `howard.fm`                                   |
+| `yt-karpathy`            | HTTP 404 (mistyped channel id)        | Channel `UCXUPKJO5MZQN11PqgIvyuvQ`                   |
+| `mistral-news`           | HTTP 404                              | Official feed `https://mistral.ai/rss.xml`           |
+| `the-batch`              | HTTP 404                              | Official feed `https://charonhub.deeplearning.ai/rss/` |
+| `meta-ai-blog`           | HTTP 404, Meta AI publishes no feed   | Replaced by `meta-ai-research` (Engineering at Meta) |
+| `jiqizhixin`             | Publishes no feed                     | Replaced by `infoq-cn` and `zhidx`                   |
+| `reddit-machinelearning` | HTTP 403 on the anonymous JSON API    | Public Atom feed (see below)                         |
+| `reddit-localllama`      | HTTP 403 on the anonymous JSON API    | Public Atom feed (see below)                         |
+
+## Reddit
+
+Reddit answers anonymous requests to its JSON endpoints with 403 and allows about one
+request a minute to the Atom feeds. The adapter therefore reads
+`/r/<subreddit>/top/.rss?t=day`, one subreddit at a time, and waits out the window
+Reddit announces in `x-ratelimit-reset` before the next request. The feed has no scores
+and no comments, so Reddit items carry neither; the day's `top` ordering and the
+`limit` in the source config stand in for a score threshold. Scores and top comments
+would need Reddit's OAuth API with an app id created by the owner.

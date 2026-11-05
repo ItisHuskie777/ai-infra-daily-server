@@ -58,7 +58,8 @@ app/
   api/               FastAPI app, bearer auth, routes
   cli.py             the `aid` command
 migrations/          numbered SQL files applied by `aid migrate`
-deploy/              Dockerfile, compose.yaml, systemd units, Caddyfile
+compose.yaml         api and scheduler services
+deploy/              Dockerfile, scheduler script, optional systemd units, Caddyfile
 docs/                requirements, deployment, per-platform cookie notes
 data/                SQLite database, model cache and dry-run previews (git-ignored)
 ```

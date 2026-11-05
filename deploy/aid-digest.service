@@ -8,6 +8,6 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/ai-infra-daily
-ExecStart=/usr/bin/docker compose -f deploy/compose.yaml run --rm digest aid run
+WorkingDirectory=/opt/ai-infra-daily-server
+ExecStart=/usr/bin/docker compose run --rm aid aid run
 TimeoutStartSec=20min
