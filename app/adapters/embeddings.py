@@ -6,6 +6,8 @@ from typing import override
 
 import numpy
 from fastembed import TextEmbedding
+from fastembed.common.model_description import ModelSource
+from fastembed.common.model_description import PoolingType
 from numpy.typing import NDArray
 
 from app import logging
@@ -14,6 +16,9 @@ from app import settings
 type Vector = NDArray[numpy.float32]
 
 logger = logging.get_logger(__name__)
+
+_BGE_M3 = "BAAI/bge-m3"
+_BGE_M3_DIMENSIONS = 1024
 
 
 class ImplementsEmbeddings(ABC):
@@ -49,11 +54,28 @@ class FastembedEmbeddings(ImplementsEmbeddings):
                 logger.info(
                     "Loading the embedding model.", extra={"model": self._model_name}
                 )
-                self._model = await asyncio.to_thread(
-                    lambda: TextEmbedding(model_name=self._model_name)
-                )
+                self._model = await asyncio.to_thread(_load, self._model_name)
 
             return self._model
+
+
+def _load(model_name: str) -> TextEmbedding:
+    supported = {model["model"] for model in TextEmbedding.list_supported_models()}
+
+    # NOTE: fastembed ships no dense bge-m3, so the official ONNX export is registered
+    # as a custom model; its first output holds token embeddings, pooled on [CLS].
+    if model_name == _BGE_M3 and _BGE_M3 not in supported:
+        TextEmbedding.add_custom_model(
+            model=_BGE_M3,
+            pooling=PoolingType.CLS,
+            normalization=True,
+            sources=ModelSource(hf=_BGE_M3),
+            dim=_BGE_M3_DIMENSIONS,
+            model_file="onnx/model.onnx",
+            additional_files=["onnx/model.onnx_data"],
+        )
+
+    return TextEmbedding(model_name=model_name)
 
 
 def normalise(vector: Vector) -> Vector:

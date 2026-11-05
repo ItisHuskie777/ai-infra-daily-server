@@ -7,20 +7,20 @@ ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never \
     PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    PATH="/srv/aid/.venv/bin:$PATH"
 
 WORKDIR /srv/aid
 
-# Dependencies first so source edits do not invalidate the cached layer.
+# Dependencies and the browser first so source edits do not invalidate these layers.
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+RUN playwright install --with-deps chromium
 
 COPY . .
 RUN uv sync --frozen --no-dev
-RUN uv run playwright install --with-deps chromium
 
 VOLUME ["/srv/aid/data"]
 EXPOSE 8000
 
-ENTRYPOINT ["uv", "run", "aid"]
-CMD ["--help"]
+CMD ["aid", "--help"]

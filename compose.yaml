@@ -1,0 +1,39 @@
+# docker compose up -d --build                           # API and hourly scheduler
+# docker compose run --rm aid aid run --force --dry-run  # one-off commands
+# docker compose run --rm aid aid sources list
+
+x-aid: &aid
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+  image: aid:latest
+  env_file:
+    - .env
+  environment:
+    DATABASE_PATH: /srv/aid/data/aid.sqlite3
+    FASTEMBED_CACHE_PATH: /srv/aid/data/models
+    API_HOST: 0.0.0.0
+    API_PORT: "8000"
+  volumes:
+    - ./data:/srv/aid/data
+  init: true
+
+services:
+  api:
+    <<: *aid
+    command: ["aid", "serve"]
+    ports:
+      # API_PUBLISH in .env picks the host address; loopback suits a reverse proxy.
+      - "${API_PUBLISH:-127.0.0.1:8000}:8000"
+    restart: unless-stopped
+
+  # Wakes at the top of every hour; `aid run` exits at once outside the delivery hour.
+  scheduler:
+    <<: *aid
+    command: ["sh", "deploy/scheduler.sh"]
+    restart: unless-stopped
+
+  aid:
+    <<: *aid
+    command: ["aid", "--help"]
+    profiles: ["tools"]
