@@ -1,0 +1,16 @@
+# /etc/systemd/system/aid-api.service
+# Keeps the HTTP API container up (feedback links, owner API, manual runs).
+[Unit]
+Description=AI Infra Daily HTTP API
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/ai-infra-daily
+ExecStart=/usr/bin/docker compose -f deploy/compose.yaml up -d api
+ExecStop=/usr/bin/docker compose -f deploy/compose.yaml stop api
+
+[Install]
+WantedBy=multi-user.target
