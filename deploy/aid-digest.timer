@@ -1,0 +1,13 @@
+# /etc/systemd/system/aid-digest.timer
+# Fires every hour; `aid run` exits immediately outside the delivery hour.
+[Unit]
+Description=Hourly AI Infra Daily digest check
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=2min
+Persistent=true
+Unit=aid-digest.service
+
+[Install]
+WantedBy=timers.target

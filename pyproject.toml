@@ -55,6 +55,7 @@ known-first-party = ["app"]
 [tool.ruff.lint.per-file-ignores]
 "app/__init__.py" = ["F401"]
 "app/**/__init__.py" = ["F401"]
+"app/cli.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.14"

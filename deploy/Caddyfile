@@ -1,0 +1,12 @@
+# /etc/caddy/Caddyfile
+# Caddy obtains and renews the certificate itself. Replace the domain; it must match
+# PUBLIC_BASE_URL in .env (https://aid.example.com) so the feedback links resolve here.
+aid.example.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:8000
+
+	log {
+		output file /var/log/caddy/aid.log
+	}
+}
