@@ -132,6 +132,14 @@ class ItemRepository:
             for row in rows
         ]
 
+    async def find_embedding(self, item_id: str) -> Vector | None:
+        row = await self._db.fetch_one(
+            "SELECT embedding FROM items WHERE id = ? AND embedding IS NOT NULL",
+            (item_id,),
+        )
+
+        return None if row is None else _to_vector(row["embedding"])
+
     async def list_by_event(self, event_id: str) -> list[StoredItem]:
         rows = await self._db.fetch_all(
             "SELECT * FROM items WHERE event_id = ? ORDER BY published_at", (event_id,)

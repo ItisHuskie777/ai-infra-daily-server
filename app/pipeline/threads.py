@@ -16,8 +16,6 @@ from app.result import is_error
 
 logger = logging.get_logger(__name__)
 
-# Slightly looser than the event threshold: a thread spans days of drifting coverage.
-_THREAD_SIMILARITY_THRESHOLD = settings.EVENT_SIMILARITY_THRESHOLD - 0.05
 _QUERY_SEPARATOR = re.compile(r"[\s,]+")
 
 
@@ -168,6 +166,14 @@ async def _match_pinned(
 
 
 async def _embed_event(ctx: AbstractContext, event: Event) -> Vector:
+    """The centroid item's stored vector when there is one, which spares a model call
+    per event; otherwise the event text is embedded."""
+    if event.centroid_item_id is not None:
+        stored = await ctx.items.find_embedding(event.centroid_item_id)
+
+        if stored is not None:
+            return stored
+
     centroid = (
         []
         if event.centroid_item_id is None
@@ -216,7 +222,7 @@ def _best_candidate(state: _LinkState, vector: Vector) -> str | None:
     for candidate in state.candidates:
         score = cosine_similarity(vector, candidate.vector)
 
-        if score >= _THREAD_SIMILARITY_THRESHOLD and score > best_score:
+        if score >= settings.THREAD_SIMILARITY_THRESHOLD and score > best_score:
             best_id = candidate.thread_id
             best_score = score
 

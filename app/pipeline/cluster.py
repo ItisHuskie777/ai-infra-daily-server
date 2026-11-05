@@ -9,11 +9,14 @@ from app.context import AbstractContext
 from app.models import Event
 from app.models import EventWithItems
 from app.models import Model
+from app.models import SourceCategory
 from app.models import StoredItem
 from app.repositories.items import EmbeddedItem
 from app.result import is_error
 
 logger = logging.get_logger(__name__)
+
+_PAPER_ORIGIN = "\x00papers"
 
 
 class ClusterOutcome(Model):
@@ -30,11 +33,20 @@ class _Window:
     """Every embedded item of the event window as one matrix, with the event each row
     belongs to; rows are assigned as the run places items."""
 
-    __slots__ = ("event_of", "items", "matrix")
+    __slots__ = ("event_of", "items", "matrix", "origins")
 
-    def __init__(self, embedded: list[EmbeddedItem]) -> None:
+    def __init__(self, embedded: list[EmbeddedItem], paper_sources: set[str]) -> None:
         self.items = [entry.item for entry in embedded]
         self.event_of: list[str | None] = [entry.item.event_id for entry in embedded]
+        # NOTE: All paper feeds count as one origin: cross-listed abstracts of one field
+        # resemble each other as much as two posts of a single blog do.
+        self.origins = numpy.array(
+            [
+                _PAPER_ORIGIN if item.source_id in paper_sources else item.source_id
+                for item in self.items
+            ],
+            dtype=numpy.str_,
+        )
 
         self.matrix: Vector = (
             numpy.stack([entry.vector for entry in embedded])
@@ -49,19 +61,26 @@ class _Window:
         return rows
 
     def nearest_event(self, row: int) -> _Placement | None:
-        """The event of the most similar already placed item, whatever its score."""
+        """The event of the most similar already placed item that clears the threshold
+        for its origin; items of one origin must be closer to count as one event."""
         scores = self.matrix @ self.matrix[row]
-        clustered = numpy.fromiter(
+        thresholds = numpy.where(
+            self.origins == self.origins[row],
+            settings.SAME_ORIGIN_SIMILARITY_THRESHOLD,
+            settings.EVENT_SIMILARITY_THRESHOLD,
+        )
+        eligible = numpy.fromiter(
             (event_id is not None for event_id in self.event_of),
             dtype=numpy.bool_,
             count=len(self.event_of),
         )
-        clustered[row] = False
+        eligible &= scores >= thresholds
+        eligible[row] = False
 
-        if not clustered.any():
+        if not eligible.any():
             return None
 
-        scores[~clustered] = -numpy.inf
+        scores[~eligible] = -numpy.inf
         best = int(numpy.argmax(scores))
         event_id = self.event_of[best]
 
@@ -167,11 +186,7 @@ async def _place_row(
     item = window.items[row]
     nearest = window.nearest_event(row)
 
-    if (
-        nearest is not None
-        and nearest.score >= settings.EVENT_SIMILARITY_THRESHOLD
-        and await _join_event(ctx, state, item, nearest.event_id)
-    ):
+    if nearest is not None and await _join_event(ctx, state, item, nearest.event_id):
         window.event_of[row] = nearest.event_id
 
         if nearest.score >= settings.DUPLICATE_SIMILARITY_THRESHOLD:
@@ -219,7 +234,12 @@ async def cluster_recent_items(ctx: AbstractContext) -> ClusterOutcome:
     vector similarity (FR3.1); the event keeps its centroid item's title until it is
     summarised."""
     window_start = ctx.clock.now() - timedelta(hours=settings.EVENT_WINDOW_HOURS)
-    window = _Window(await ctx.items.list_embedded_since(window_start))
+    paper_sources = {
+        source.id
+        for source in await ctx.sources.list_all()
+        if source.category == SourceCategory.PAPER
+    }
+    window = _Window(await ctx.items.list_embedded_since(window_start), paper_sources)
     state = _RunState()
     rows = window.pending_rows()
 

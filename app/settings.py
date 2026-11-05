@@ -32,7 +32,13 @@ SOURCE_FETCH_CONCURRENCY = 8
 SOURCE_FETCH_TIMEOUT_SECONDS = 15.0
 EVENT_WINDOW_HOURS = 72
 THREAD_INACTIVE_DAYS = 7
-EVENT_SIMILARITY_THRESHOLD = 0.82
+# Calibrated on 374 real items embedded with BAAI/bge-m3: reports of one event from
+# different sources score 0.72 to 0.87, while two posts of one source or two papers
+# below 0.80 are nearly always separate events. Re-calibrate when the model changes.
+EVENT_SIMILARITY_THRESHOLD = 0.72
+SAME_ORIGIN_SIMILARITY_THRESHOLD = 0.80
+# Provisional: one day of data cannot show how coverage drifts across days.
+THREAD_SIMILARITY_THRESHOLD = 0.72
 DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 INDIVIDUAL_VOICE_MIN_SHARE = 0.3
 DIGEST_EVENT_LIMITS = {"brief": 5, "balanced": 8, "deep": 12}
