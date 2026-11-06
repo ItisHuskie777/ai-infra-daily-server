@@ -32,11 +32,15 @@ class ItemKind(StrEnum):
 
 
 class DigestSection(StrEnum):
-    TOP = "top"
-    THREADS = "threads"
-    VOICES = "voices"
-    PAPERS = "papers"
-    COMMUNITY = "community"
+    """Categories of the digest, in the order the email shows them."""
+
+    MODELS = "models"
+    RESEARCH = "research"
+    INFRASTRUCTURE = "infrastructure"
+    AGENTS = "agents"
+    BUSINESS = "business"
+    POLICY = "policy"
+    OTHER = "other"
 
 
 class DigestStyle(StrEnum):

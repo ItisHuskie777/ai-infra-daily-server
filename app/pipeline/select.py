@@ -1,5 +1,4 @@
 import math
-import re
 from collections.abc import Sequence
 
 from app import settings
@@ -10,6 +9,7 @@ from app.models import ItemKind
 from app.models import Model
 from app.models import RankedEvent
 from app.models import StoredItem
+from app.models import Topic
 
 _KIND_ORDER = {
     ItemKind.PRIMARY: 0,
@@ -18,7 +18,19 @@ _KIND_ORDER = {
     ItemKind.DISCUSSION: 3,
 }
 _VOICE_KINDS = frozenset({ItemKind.COMMENTARY, ItemKind.DISCUSSION})
-_PAPER_URL = re.compile(r"^https?://(?:www\.)?arxiv\.org/", re.IGNORECASE)
+_SECTION_OF_TOPIC: dict[Topic, DigestSection] = {
+    Topic.MODELS: DigestSection.MODELS,
+    Topic.OPEN_SOURCE: DigestSection.MODELS,
+    Topic.RESEARCH: DigestSection.RESEARCH,
+    Topic.TRAINING: DigestSection.RESEARCH,
+    Topic.INFERENCE: DigestSection.INFRASTRUCTURE,
+    Topic.HARDWARE: DigestSection.INFRASTRUCTURE,
+    Topic.AGENTS: DigestSection.AGENTS,
+    Topic.TOOLING: DigestSection.AGENTS,
+    Topic.BUSINESS: DigestSection.BUSINESS,
+    Topic.PRODUCTS: DigestSection.BUSINESS,
+    Topic.POLICY: DigestSection.POLICY,
+}
 
 
 class _Candidate(Model):
@@ -27,10 +39,6 @@ class _Candidate(Model):
     items: tuple[StoredItem, ...]
     section: DigestSection
     has_voice: bool
-
-
-def is_paper(url: str) -> bool:
-    return _PAPER_URL.match(url) is not None
 
 
 def engagement_value(item: StoredItem) -> int:
@@ -55,26 +63,32 @@ def _item_order(item: StoredItem) -> tuple[int, int, float]:
     )
 
 
-def _section_for(
-    event: RankedEvent, items: Sequence[StoredItem], pinned_thread_ids: set[str]
-) -> DigestSection:
-    thread = event.thread
+def section_for(topics: Sequence[Topic]) -> DigestSection:
+    """The category of an event is that of its main (first) topic."""
+    if len(topics) == 0:
+        return DigestSection.OTHER
 
-    if thread is not None and (
-        thread.day_count > 1 or thread.pinned or thread.id in pinned_thread_ids
-    ):
-        return DigestSection.THREADS
+    return _SECTION_OF_TOPIC[topics[0]]
 
-    if any(item.kind == ItemKind.PRIMARY and is_paper(item.url) for item in items):
-        return DigestSection.PAPERS
 
-    if all(item.kind == ItemKind.COMMENTARY for item in items):
-        return DigestSection.VOICES
+def _interleave_by_section(candidates: Sequence[_Candidate]) -> list[_Candidate]:
+    """Round-robin over the categories, best category first: every category's best
+    event precedes any category's second, so no single category fills the digest."""
+    queues: dict[DigestSection, list[_Candidate]] = {}
 
-    if all(item.kind == ItemKind.DISCUSSION for item in items):
-        return DigestSection.COMMUNITY
+    for candidate in candidates:
+        queues.setdefault(candidate.section, []).append(candidate)
 
-    return DigestSection.TOP
+    interleaved: list[_Candidate] = []
+    depth = 0
+
+    while len(interleaved) < len(candidates):
+        interleaved.extend(
+            queue[depth] for queue in queues.values() if depth < len(queue)
+        )
+        depth += 1
+
+    return interleaved
 
 
 def _to_candidate(
@@ -82,7 +96,6 @@ def _to_candidate(
     rank: int,
     *,
     already_sent_item_ids: set[str],
-    pinned_thread_ids: set[str],
 ) -> _Candidate | None:
     items = sorted(
         (item for item in event.items if item.id not in already_sent_item_ids),
@@ -96,7 +109,7 @@ def _to_candidate(
         rank=rank,
         event=event,
         items=tuple(items),
-        section=_section_for(event, items, pinned_thread_ids),
+        section=section_for(event.topics),
         has_voice=any(item.kind in _VOICE_KINDS for item in items),
     )
 
@@ -110,8 +123,9 @@ def _is_pinned(candidate: _Candidate, pinned_thread_ids: set[str]) -> bool:
 def _pick_with_voice_share(
     candidates: Sequence[_Candidate], *, limit: int, pinned_thread_ids: set[str]
 ) -> list[_Candidate]:
-    """Top `limit` by rank, with pinned threads always kept (FR4.2) and voice events
-    swapped in from below the cut until their share is met (FR5.2)."""
+    """The first `limit` candidates in the order given, with pinned threads always
+    kept (FR4.2) and voice events swapped in from below the cut until their share is
+    met (FR5.2); the result is back in rank order."""
     pinned = [c for c in candidates if _is_pinned(c, pinned_thread_ids)]
     others = [c for c in candidates if not _is_pinned(c, pinned_thread_ids)]
     budget = max(0, limit - len(pinned))
@@ -141,25 +155,22 @@ def select_for_digest(
     already_sent_item_ids: set[str],
     pinned_thread_ids: set[str],
 ) -> list[DigestEventPlacement]:
-    """Pure assignment of ranked events to digest sections within the style's event
-    budget. Items already sent are removed first, so an event with nothing new is
-    dropped entirely (FR2.2, FR5.2)."""
+    """Pure assignment of ranked events to digest categories within the style's event
+    budget, drawing on the categories in turn (FR5.6). Items already sent are removed
+    first, so an event with nothing new is dropped entirely (FR2.2, FR5.2)."""
     candidates = [
         candidate
         for rank, event in enumerate(ranked)
         if (
             candidate := _to_candidate(
-                event,
-                rank,
-                already_sent_item_ids=already_sent_item_ids,
-                pinned_thread_ids=pinned_thread_ids,
+                event, rank, already_sent_item_ids=already_sent_item_ids
             )
         )
         is not None
     ]
 
     chosen = _pick_with_voice_share(
-        candidates,
+        _interleave_by_section(candidates),
         limit=settings.DIGEST_EVENT_LIMITS[style],
         pinned_thread_ids=pinned_thread_ids,
     )

@@ -22,7 +22,7 @@ from app.result import is_error
 
 logger = logging.get_logger(__name__)
 
-_TOPIC_LINES = tuple(recommend.TOPIC_LABELS.items())
+_TOPIC_LINES = tuple(recommend.TOPIC_DESCRIPTIONS.items())
 
 _RANK_BATCH_SIZE = 15
 _ITEMS_PER_EVENT_IN_PROMPT = 5
@@ -34,7 +34,8 @@ _RANK_SYSTEM_PROMPT = (
     "and only a few per batch more than 0.8. Where the profile is sparse, judge by "
     "how much the event matters to a practitioner who follows AI models, "
     "infrastructure and tooling. Also tag each event with one or two topics from the "
-    "list given, using the topic keys exactly."
+    "list given, using the topic keys exactly; put first the topic that says what "
+    "kind of news the event is, since it decides the event's category."
 )
 _MAX_TOPICS_PER_EVENT = 2
 _TOPIC_VALUES = frozenset(topic.value for topic in Topic)

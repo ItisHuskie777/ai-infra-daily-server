@@ -5,6 +5,7 @@ from typing import override
 from pydantic import Field
 
 from app import logging
+from app import settings
 from app.context import AbstractContext
 from app.models import Comment
 from app.models import DigestEventPlacement
@@ -34,11 +35,12 @@ _LENGTH_TARGETS: dict[DigestStyle, int] = {
     DigestStyle.BALANCED: 120,
     DigestStyle.DEEP: 220,
 }
-_SUMMARY_CHARACTER_CAPS: dict[DigestStyle, int] = {
-    DigestStyle.BRIEF: 800,
-    DigestStyle.BALANCED: 1500,
-    DigestStyle.DEEP: 2600,
+_COMPACT_LENGTH_TARGETS: dict[DigestStyle, int] = {
+    DigestStyle.BRIEF: 30,
+    DigestStyle.BALANCED: 50,
+    DigestStyle.DEEP: 80,
 }
+_CHARACTERS_PER_WORD_CAP = 12
 _MAX_KEY_CLAIMS: dict[DigestStyle, int] = {
     DigestStyle.BRIEF: 3,
     DigestStyle.BALANCED: 5,
@@ -156,13 +158,40 @@ def _describe_item(item: StoredItem) -> str:
     return "\n".join(lines)
 
 
+def _length_target(style: DigestStyle) -> int:
+    if settings.DIGEST_COMPACT:
+        return _COMPACT_LENGTH_TARGETS[style]
+
+    return _LENGTH_TARGETS[style]
+
+
+def _max_key_claims(style: DigestStyle) -> int:
+    return 0 if settings.DIGEST_COMPACT else _MAX_KEY_CLAIMS[style]
+
+
+def _max_takes(depth: TechnicalDepth) -> int:
+    return 0 if settings.DIGEST_COMPACT else _MAX_TAKES[depth]
+
+
 def _length_instruction(style: DigestStyle, language: Language) -> str:
-    target = _LENGTH_TARGETS[style]
+    target = _length_target(style)
 
     if language is Language.ZH:
-        return f"Target length for the summary: about {target * 2} Chinese characters."
+        return (
+            f"The summary is one paragraph of at most {target * 2} Chinese characters."
+        )
 
-    return f"Target length for the summary: about {target} words."
+    return f"The summary is one paragraph of at most {target} words."
+
+
+def _extras_instruction(style: DigestStyle, depth: TechnicalDepth) -> str:
+    claims = _max_key_claims(style)
+    takes = _max_takes(depth)
+
+    if claims == 0 and takes == 0:
+        return "Return empty lists for key_claims and takes."
+
+    return f"At most {claims} key claims and {takes} takes."
 
 
 def _build_prompt(
@@ -195,8 +224,9 @@ def _build_prompt(
             "- Language policy: English items are summarised in English, Chinese "
             "items in Chinese, any other language in English; a mixed event follows "
             "the majority of its items.",
-            "- The summary is neutral and factual; key claims are short statements "
-            "made by the sources.",
+            "- The summary is neutral and factual and opens with what happened. "
+            "Never comment on the sources themselves or on what they leave out. Key "
+            "claims are short statements made by the sources.",
             '- "takes" quotes individual commentary and comments that add a distinct '
             "viewpoint. Each quote MUST be copied verbatim from the input text "
             "below, in its original language, never translated or paraphrased. "
@@ -204,8 +234,7 @@ def _build_prompt(
             "or two English words (for example supportive, sceptical, neutral).",
             f"- {_DEPTH_GUIDANCE[depth]}",
             f"- {_length_instruction(style, language)}",
-            f"- At most {_MAX_KEY_CLAIMS[style]} key claims and {_MAX_TAKES[depth]} "
-            "takes.",
+            f"- {_extras_instruction(style, depth)}",
             "",
             "## Primary sources and media coverage",
             coverage_text,
@@ -274,7 +303,7 @@ def _verify_takes(
 
 def _cap_summary(text: str, style: DigestStyle) -> str:
     flat = text.strip()
-    cap = _SUMMARY_CHARACTER_CAPS[style]
+    cap = _length_target(style) * _CHARACTERS_PER_WORD_CAP
 
     if len(flat) <= cap:
         return flat
@@ -342,7 +371,7 @@ async def summarise_event(
     return EventSummary(
         title=generated.title.strip(),
         summary=_cap_summary(generated.summary, style),
-        key_claims=tuple(claims[: _MAX_KEY_CLAIMS[style]]),
-        takes=tuple(takes[: _MAX_TAKES[depth]]),
+        key_claims=tuple(claims[: _max_key_claims(style)]),
+        takes=tuple(takes[: _max_takes(depth)]),
         language=language,
     )

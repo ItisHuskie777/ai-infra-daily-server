@@ -56,5 +56,8 @@ REDUNDANCY_SIMILARITY_THRESHOLD = 0.66
 REDUNDANCY_FACTOR = 0.5
 DIVERSIFY_POOL_SIZE = 60
 DIGEST_EVENT_LIMITS = {"brief": 5, "balanced": 8, "deep": 12}
+# Compact digests carry a title and a short summary per event; the full layout adds
+# key claims, quoted takes and the mute and pin links.
+DIGEST_COMPACT = True
 FEEDBACK_TOKEN_DAYS = 14
 USER_AGENT = "ai-infra-daily/3.0 (personal digest; contact via repository)"

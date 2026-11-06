@@ -30,6 +30,21 @@ TOPIC_LABELS: dict[Topic, str] = {
 }
 
 
+TOPIC_DESCRIPTIONS: dict[Topic, str] = {
+    Topic.MODELS: "a new model or model version, its capabilities and benchmarks",
+    Topic.INFERENCE: "running models: serving, latency, quantisation, local inference",
+    Topic.HARDWARE: "chips, accelerators, clusters and data centres",
+    Topic.TRAINING: "training and fine-tuning methods, data and recipes",
+    Topic.AGENTS: "agents, agent frameworks and how they are built or evaluated",
+    Topic.TOOLING: "libraries, SDKs and developer tools",
+    Topic.RESEARCH: "papers and scientific findings",
+    Topic.OPEN_SOURCE: "open-weight model ecosystems and licences",
+    Topic.POLICY: "safety, regulation, politics and public debate",
+    Topic.BUSINESS: "companies, funding, deals, hiring and market moves",
+    Topic.PRODUCTS: "consumer and enterprise products built on models",
+}
+
+
 class EventSignals(Model):
     """Everything the score depends on, so scoring itself is a pure function."""
 

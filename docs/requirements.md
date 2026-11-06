@@ -55,6 +55,7 @@ top-voted comments.
 - FR5.3 Comments are selected by engagement (likes/upvotes) and by LLM judgement of whether they add a distinct viewpoint, not just agreement.
 - FR5.4 The ranking model also tags every event with one or two topics from a fixed taxonomy. The final recommendation score is the product of the model's relevance, the strongest source weight, the owner's learned weight for the event's topics, a boost for coverage by several independent sources, a freshness decay and a penalty for events with almost no body text.
 - FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
+- FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Selection draws on the categories in turn, so every category with news is represented before any category gets a second event.
 
 ### FR6 Summarisation and digest composition
 
@@ -69,6 +70,7 @@ top-voted comments.
 - FR7.2 Each event in the email has feedback links (more like this / less like this / mute source). Feedback adjusts source weights and interest keywords.
 - FR7.2a "More like this" and "less like this" also move the owner's weight for the event's topics.
 - FR7.2b The foot of each email carries at most two multiple-choice questions: which of the day's topics to see more of, and (alternating by day) whether the digest was too long or too short, or how technical the summaries should be. One tap answers; each question accepts one answer per digest.
+- FR7.2c The default layout is compact: each event is a title and a summary of two or three sentences, with "more like this" and "less like this" links. Key claims, quoted takes and the mute and pin links belong to the full layout (`DIGEST_COMPACT = False`).
 - FR7.3 A chat interface lets the owner change preferences, ask "why was this included", and ask for the history of a thread. Preference changes are made through structured tool calls, not regex.
 
 ## Quality attributes (measurable)

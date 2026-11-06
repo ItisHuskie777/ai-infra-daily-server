@@ -36,13 +36,6 @@ from app.sources import seeds
 
 logger = logging.get_logger(__name__)
 
-_SECTION_ORDER = (
-    DigestSection.TOP,
-    DigestSection.THREADS,
-    DigestSection.VOICES,
-    DigestSection.PAPERS,
-    DigestSection.COMMUNITY,
-)
 _DRY_RUN_DIRECTORY = Path("data")
 
 
@@ -170,7 +163,7 @@ async def _summarise_all(
 
     return [
         ComposedSection(section=section, events=tuple(buckets[section]))
-        for section in _SECTION_ORDER
+        for section in DigestSection
         if section in buckets
     ]
 

@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 from jinja2 import Environment
 from jinja2 import FileSystemLoader
 
+from app import settings
 from app.models import DigestEventPlacement
 from app.models import DigestSection
 from app.models import DigestStyle
@@ -19,19 +20,14 @@ from app.pipeline.summarise import EventSummary
 
 _DIGEST_NAME = "AI Infra Daily"
 _TEMPLATES = Path(__file__).resolve().parents[2] / "templates"
-_SECTION_ORDER: tuple[DigestSection, ...] = (
-    DigestSection.TOP,
-    DigestSection.THREADS,
-    DigestSection.VOICES,
-    DigestSection.PAPERS,
-    DigestSection.COMMUNITY,
-)
 _SECTION_TITLES: dict[DigestSection, str] = {
-    DigestSection.TOP: "Top events",
-    DigestSection.THREADS: "Continuing threads",
-    DigestSection.VOICES: "Individual voices",
-    DigestSection.PAPERS: "Papers & releases",
-    DigestSection.COMMUNITY: "Community",
+    DigestSection.MODELS: "Models and releases",
+    DigestSection.RESEARCH: "Research",
+    DigestSection.INFRASTRUCTURE: "Infrastructure",
+    DigestSection.AGENTS: "Agents and tools",
+    DigestSection.BUSINESS: "Business and products",
+    DigestSection.POLICY: "Policy and safety",
+    DigestSection.OTHER: "Other",
 }
 _FEEDBACK_LABELS: dict[FeedbackSignal, str] = {
     FeedbackSignal.MORE_LIKE_THIS: "more like this",
@@ -99,7 +95,7 @@ class _SectionView(Model):
 def _ordered_sections(sections: Sequence[ComposedSection]) -> list[ComposedSection]:
     ordered: list[ComposedSection] = []
 
-    for section in _SECTION_ORDER:
+    for section in DigestSection:
         events = tuple(
             event
             for candidate in sections
@@ -149,14 +145,13 @@ def _feedback_url(
 def _feedback_links(
     base_url: str, token: str, event: ComposedEvent, primary: StoredItem | None
 ) -> tuple[_FeedbackLink, ...]:
-    signals = [
-        FeedbackSignal.MORE_LIKE_THIS,
-        FeedbackSignal.LESS_LIKE_THIS,
-        FeedbackSignal.MUTE_SOURCE,
-    ]
+    signals = [FeedbackSignal.MORE_LIKE_THIS, FeedbackSignal.LESS_LIKE_THIS]
 
-    if event.thread is not None:
-        signals.append(FeedbackSignal.PIN_THREAD)
+    if not settings.DIGEST_COMPACT:
+        signals.append(FeedbackSignal.MUTE_SOURCE)
+
+        if event.thread is not None:
+            signals.append(FeedbackSignal.PIN_THREAD)
 
     return tuple(
         _FeedbackLink(
@@ -235,7 +230,14 @@ def compose_digest_html(
     quizzes: Sequence[Quiz] = (),
 ) -> ComposedDigest:
     ordered = _ordered_sections(sections)
-    top_title = ordered[0].events[0].summary.title if ordered else None
+    events = [event for section in ordered for event in section.events]
+    top_title = (
+        max(
+            events, key=lambda event: event.placement.event.relevance_score
+        ).summary.title
+        if events
+        else None
+    )
     subject = _subject_for(date, top_title)
     base_url = feedback_base_url.rstrip("/")
     views = [
