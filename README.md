@@ -91,7 +91,7 @@ uv run aid run                       # sends only at the delivery hour, once per
 uv run aid stage fetch|embed|cluster|threads
 uv run aid sources list|enable|disable|weight
 uv run aid prefs show|set-email|set-hour|set-style|set-depth|add-topic|remove-topic|
-           add-keyword [--exclude]|remove-keyword|follow|block
+           add-keyword [--exclude]|remove-keyword|follow|block|unblock
 uv run aid digests list
 uv run aid threads list
 uv run aid serve                     # HTTP API on API_HOST:API_PORT

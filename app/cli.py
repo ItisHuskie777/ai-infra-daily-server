@@ -156,6 +156,8 @@ def _edit_interests(interests: Interests, args: argparse.Namespace) -> Interests
             update = {"followed_authors": _with(interests.followed_authors, value)}
         case "block":
             update = {"blocked_sources": _with(interests.blocked_sources, value)}
+        case "unblock":
+            update = {"blocked_sources": _without(interests.blocked_sources, value)}
         case _:
             update = {}
 
@@ -254,7 +256,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "value", choices=[depth.value for depth in TechnicalDepth]
     )
 
-    for action in ("add-topic", "remove-topic", "remove-keyword", "follow", "block"):
+    for action in (
+        "add-topic",
+        "remove-topic",
+        "remove-keyword",
+        "follow",
+        "block",
+        "unblock",
+    ):
         pref_actions.add_parser(action).add_argument("value")
 
     keyword = pref_actions.add_parser("add-keyword")
