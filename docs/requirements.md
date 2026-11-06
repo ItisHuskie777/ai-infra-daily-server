@@ -61,7 +61,7 @@ top-voted comments.
 
 - FR6.1 For each selected event the LLM produces: a neutral summary, the key claims, and a short "different takes" section quoting individual posts and comments with attribution and links.
 - FR6.2 Digest style (brief, balanced, deep) controls length and number of events.
-- FR6.3 The email is grouped into sections: Top events, Continuing threads, Individual voices, Papers & releases, Community, Source health.
+- FR6.3 The email is grouped by category (FR5.6); a story that has run for more than one day carries a "Day N of this story" badge.
 - FR6.4 Chinese-language sources are summarised in the owner's preferred language (configurable; default English with original quotes kept in Chinese).
 
 ### FR7 Delivery and interaction
