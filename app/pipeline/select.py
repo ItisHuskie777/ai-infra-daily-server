@@ -71,24 +71,15 @@ def section_for(topics: Sequence[Topic]) -> DigestSection:
     return _SECTION_OF_TOPIC[topics[0]]
 
 
-def _interleave_by_section(candidates: Sequence[_Candidate]) -> list[_Candidate]:
-    """Round-robin over the categories, best category first: every category's best
-    event precedes any category's second, so no single category fills the digest."""
+def _by_section(
+    candidates: Sequence[_Candidate],
+) -> dict[DigestSection, list[_Candidate]]:
     queues: dict[DigestSection, list[_Candidate]] = {}
 
     for candidate in candidates:
         queues.setdefault(candidate.section, []).append(candidate)
 
-    interleaved: list[_Candidate] = []
-    depth = 0
-
-    while len(interleaved) < len(candidates):
-        interleaved.extend(
-            queue[depth] for queue in queues.values() if depth < len(queue)
-        )
-        depth += 1
-
-    return interleaved
+    return queues
 
 
 def _to_candidate(
@@ -155,9 +146,10 @@ def select_for_digest(
     already_sent_item_ids: set[str],
     pinned_thread_ids: set[str],
 ) -> list[DigestEventPlacement]:
-    """Pure assignment of ranked events to digest categories within the style's event
-    budget, drawing on the categories in turn (FR5.6). Items already sent are removed
-    first, so an event with nothing new is dropped entirely (FR2.2, FR5.2)."""
+    """Pure assignment of ranked events to digest categories: each category gets its
+    best events up to the style's per-category budget, so no single category fills
+    the digest (FR5.6). Items already sent are removed first, so an event with nothing
+    new is dropped entirely (FR2.2, FR5.2)."""
     candidates = [
         candidate
         for rank, event in enumerate(ranked)
@@ -169,10 +161,17 @@ def select_for_digest(
         is not None
     ]
 
-    chosen = _pick_with_voice_share(
-        _interleave_by_section(candidates),
-        limit=settings.DIGEST_EVENT_LIMITS[style],
-        pinned_thread_ids=pinned_thread_ids,
+    chosen = sorted(
+        (
+            candidate
+            for queue in _by_section(candidates).values()
+            for candidate in _pick_with_voice_share(
+                queue,
+                limit=settings.DIGEST_EVENTS_PER_CATEGORY[style],
+                pinned_thread_ids=pinned_thread_ids,
+            )
+        ),
+        key=lambda candidate: candidate.rank,
     )
 
     positions: dict[DigestSection, int] = {}

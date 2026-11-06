@@ -52,9 +52,10 @@ already ranked higher are held back. Topic weights start neutral and move with t
 per-event feedback links and with the one or two multiple-choice questions at the foot
 of every email (`app/pipeline/quiz.py`); `aid prefs show` prints them.
 
-The email is organised by category, taken from each event's main topic, and selection
-draws on the categories in turn so that no single one fills the digest. By default an
-event is a title and a short summary (`DIGEST_COMPACT` in `app/settings.py`).
+The email is organised by category, taken from each event's main topic, and every
+category gets its best events up to a per-category budget (10, 15 or 20 by digest
+style), so no single one fills the digest. By default an event is a title and a short
+summary (`DIGEST_COMPACT` in `app/settings.py`).
 
 ## Layout
 

@@ -136,19 +136,13 @@ def adjust_topic_weights(
     return adjusted
 
 
-def _is_redundant(
-    event: RankedEvent, chosen: Sequence[RankedEvent], vectors: Mapping[str, Vector]
-) -> bool:
+def _repeats(event: RankedEvent, picked: Vector, vectors: Mapping[str, Vector]) -> bool:
     vector = vectors.get(event.id)
 
-    if vector is None:
-        return False
-
-    return any(
-        other.id in vectors
-        and cosine_similarity(vector, vectors[other.id])
+    return (
+        vector is not None
+        and cosine_similarity(vector, picked)
         >= settings.REDUNDANCY_SIMILARITY_THRESHOLD
-        for other in chosen
     )
 
 
@@ -159,22 +153,29 @@ def diversify(
     where an event that repeats a story already picked counts for less. Events beyond
     the pool, and events without a vector, keep their order."""
     pool = list(ranked[: settings.DIVERSIFY_POOL_SIZE])
+    redundant = [False] * len(pool)
+    remaining = list(range(len(pool)))
     chosen: list[RankedEvent] = []
 
-    while len(pool) > 0:
+    while len(remaining) > 0:
         best = max(
-            pool,
-            key=lambda event: (
-                event.relevance_score
-                * (
-                    settings.REDUNDANCY_FACTOR
-                    if _is_redundant(event, chosen, vectors)
-                    else 1.0
-                ),
-                -pool.index(event),
+            remaining,
+            key=lambda index: (
+                pool[index].relevance_score
+                * (settings.REDUNDANCY_FACTOR if redundant[index] else 1.0),
+                -index,
             ),
         )
-        pool.remove(best)
-        chosen.append(best)
+        remaining.remove(best)
+        chosen.append(pool[best])
+        picked = vectors.get(pool[best].id)
+
+        if picked is None:
+            continue
+
+        for index in remaining:
+            redundant[index] = redundant[index] or _repeats(
+                pool[index], picked, vectors
+            )
 
     return [*chosen, *ranked[settings.DIVERSIFY_POOL_SIZE :]]

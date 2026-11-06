@@ -55,12 +55,12 @@ top-voted comments.
 - FR5.3 Comments are selected by engagement (likes/upvotes) and by LLM judgement of whether they add a distinct viewpoint, not just agreement.
 - FR5.4 The ranking model also tags every event with one or two topics from a fixed taxonomy. The final recommendation score is the product of the model's relevance, the strongest source weight, the owner's learned weight for the event's topics, a boost for coverage by several independent sources, a freshness decay and a penalty for events with almost no body text.
 - FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
-- FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Selection draws on the categories in turn, so every category with news is represented before any category gets a second event.
+- FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Every category gets its best events up to a per-category budget (10, 15 or 20 by digest style), so no single category fills the digest; a category with less news shows what it has.
 
 ### FR6 Summarisation and digest composition
 
 - FR6.1 For each selected event the LLM produces: a neutral summary, the key claims, and a short "different takes" section quoting individual posts and comments with attribution and links.
-- FR6.2 Digest style (brief, balanced, deep) controls length and number of events.
+- FR6.2 Digest style (brief, balanced, deep) controls the summary length and the number of events per category.
 - FR6.3 The email is grouped by category (FR5.6); a story that has run for more than one day carries a "Day N of this story" badge.
 - FR6.4 Chinese-language sources are summarised in the owner's preferred language (configurable; default English with original quotes kept in Chinese).
 

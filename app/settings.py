@@ -54,8 +54,10 @@ THIN_CONTENT_FACTOR = 0.4
 # Events this close to one already chosen repeat a story; they are held back.
 REDUNDANCY_SIMILARITY_THRESHOLD = 0.66
 REDUNDANCY_FACTOR = 0.5
-DIVERSIFY_POOL_SIZE = 60
-DIGEST_EVENT_LIMITS = {"brief": 5, "balanced": 8, "deep": 12}
+DIVERSIFY_POOL_SIZE = 300
+# Events per category; a category with less news shows what it has.
+DIGEST_EVENTS_PER_CATEGORY = {"brief": 10, "balanced": 15, "deep": 20}
+SUMMARY_CONCURRENCY = 5
 # Compact digests carry a title and a short summary per event; the full layout adds
 # key claims, quoted takes and the mute and pin links.
 DIGEST_COMPACT = True

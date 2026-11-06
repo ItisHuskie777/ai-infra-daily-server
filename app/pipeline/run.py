@@ -29,6 +29,8 @@ from app.pipeline import summarise
 from app.pipeline import threads
 from app.pipeline.compose import ComposedEvent
 from app.pipeline.compose import ComposedSection
+from app.pipeline.summarise import EventSummary
+from app.result import OnSuccess
 from app.result import is_error
 from app.sources import fetch_all
 from app.sources import registry
@@ -138,15 +140,20 @@ async def _summarise_all(
     interests: Interests,
 ) -> list[ComposedSection]:
     buckets: dict[DigestSection, list[ComposedEvent]] = {}
+    semaphore = asyncio.Semaphore(settings.SUMMARY_CONCURRENCY)
 
-    for placement in placements:
-        summary = await summarise.summarise_event(
-            ctx,
-            placement,
-            style=profile.digest_style,
-            depth=interests.technical_depth,
-        )
+    async def summarised(placement: DigestEventPlacement) -> OnSuccess[EventSummary]:
+        async with semaphore:
+            return await summarise.summarise_event(
+                ctx,
+                placement,
+                style=profile.digest_style,
+                depth=interests.technical_depth,
+            )
 
+    summaries = await asyncio.gather(*(summarised(entry) for entry in placements))
+
+    for placement, summary in zip(placements, summaries, strict=True):
         if is_error(summary):
             logger.warning(
                 "Event summary failed; event skipped.",
