@@ -37,11 +37,13 @@
 <span style="display:block;margin-top:4px;font-size:13px;color:#6b7280;">&mdash; {{ take.author }}{% if take.stance %} &middot; {{ take.stance }}{% endif %} &middot; <a href="{{ take.url }}" style="color:#6b7280;">source</a></span></blockquote>
 {% endfor %}
 {% endif %}
+{% if event.feedback %}
 <p style="margin:8px 0 0 0;font-size:12px;color:#6b7280;">Feedback:
 {% for link in event.feedback %}
 <a href="{{ link.url }}" style="color:#6b7280;">{{ link.label }}</a>{% if not loop.last %} &middot;{% endif %}
 {% endfor %}
 </p>
+{% endif %}
 </div>
 {% endfor %}
 {% endfor %}

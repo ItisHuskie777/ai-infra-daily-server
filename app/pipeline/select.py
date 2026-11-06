@@ -148,12 +148,14 @@ def select_for_digest(
 ) -> list[DigestEventPlacement]:
     """Pure assignment of ranked events to digest categories: each category gets its
     best events up to the style's per-category budget, so no single category fills
-    the digest (FR5.6). Items already sent are removed first, so an event with nothing
-    new is dropped entirely (FR2.2, FR5.2)."""
+    the digest (FR5.6); off-topic events below the minimum score are left out. Items
+    already sent are removed first, so an event with nothing new is dropped entirely
+    (FR2.2, FR5.2)."""
     candidates = [
         candidate
         for rank, event in enumerate(ranked)
-        if (
+        if event.relevance_score >= settings.MIN_RECOMMENDATION_SCORE
+        and (
             candidate := _to_candidate(
                 event, rank, already_sent_item_ids=already_sent_item_ids
             )

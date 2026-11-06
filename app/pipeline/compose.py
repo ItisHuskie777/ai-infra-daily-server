@@ -145,13 +145,19 @@ def _feedback_url(
 def _feedback_links(
     base_url: str, token: str, event: ComposedEvent, primary: StoredItem | None
 ) -> tuple[_FeedbackLink, ...]:
-    signals = [FeedbackSignal.MORE_LIKE_THIS, FeedbackSignal.LESS_LIKE_THIS]
+    # NOTE: Two links per event double the size of a compact digest of sixty events,
+    # past the point where mail clients clip the message; the quiz collects taste.
+    if settings.DIGEST_COMPACT:
+        return ()
 
-    if not settings.DIGEST_COMPACT:
-        signals.append(FeedbackSignal.MUTE_SOURCE)
+    signals = [
+        FeedbackSignal.MORE_LIKE_THIS,
+        FeedbackSignal.LESS_LIKE_THIS,
+        FeedbackSignal.MUTE_SOURCE,
+    ]
 
-        if event.thread is not None:
-            signals.append(FeedbackSignal.PIN_THREAD)
+    if event.thread is not None:
+        signals.append(FeedbackSignal.PIN_THREAD)
 
     return tuple(
         _FeedbackLink(

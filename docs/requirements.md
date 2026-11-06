@@ -70,7 +70,7 @@ top-voted comments.
 - FR7.2 Each event in the email has feedback links (more like this / less like this / mute source). Feedback adjusts source weights and interest keywords.
 - FR7.2a "More like this" and "less like this" also move the owner's weight for the event's topics.
 - FR7.2b The foot of each email carries at most two multiple-choice questions: which of the day's topics to see more of, and (alternating by day) whether the digest was too long or too short, or how technical the summaries should be. One tap answers; each question accepts one answer per digest.
-- FR7.2c The default layout is compact: each event is a title and a summary of two or three sentences, with "more like this" and "less like this" links. Key claims, quoted takes and the mute and pin links belong to the full layout (`DIGEST_COMPACT = False`).
+- FR7.2c The default layout is compact: each event is a title and a summary of one or two sentences, and taste is collected by the quiz alone, which keeps a digest of sixty events below the size at which mail clients clip a message. Key claims, quoted takes and the per-event feedback links belong to the full layout (`DIGEST_COMPACT = False`).
 - FR7.3 A chat interface lets the owner change preferences, ask "why was this included", and ask for the history of a thread. Preference changes are made through structured tool calls, not regex.
 
 ## Quality attributes (measurable)
