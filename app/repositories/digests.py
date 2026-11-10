@@ -130,9 +130,10 @@ class DigestRepository:
 
         return [str(row["id"]) for row in rows]
 
-    async def record_feedback(self, feedback: Feedback) -> None:
-        await self._db.execute(
-            "INSERT INTO feedback (created_at, digest_id, event_id, item_id, "
+    async def record_feedback(self, feedback: Feedback) -> OnSuccess[None]:
+        """Each link acts once: the same signal on the same target is a conflict."""
+        changed = await self._db.execute(
+            "INSERT OR IGNORE INTO feedback (created_at, digest_id, event_id, item_id, "
             "source_id, signal) VALUES (?,?,?,?,?,?)",
             (
                 to_iso(feedback.created_at),
@@ -143,6 +144,8 @@ class DigestRepository:
                 feedback.signal,
             ),
         )
+
+        return StoreError.CONFLICT if changed == 0 else None
 
     async def find_quiz_answer(
         self, digest_id: str, question: QuizQuestion
@@ -158,16 +161,13 @@ class DigestRepository:
         self, digest_id: str, question: QuizQuestion, answer: str, *, now: datetime
     ) -> OnSuccess[None]:
         """One answer per digest and question; a repeat is a conflict."""
-        if await self.find_quiz_answer(digest_id, question) is not None:
-            return StoreError.CONFLICT
-
-        await self._db.execute(
-            "INSERT INTO quiz_answers (digest_id, question, answer, created_at) "
-            "VALUES (?,?,?,?)",
+        changed = await self._db.execute(
+            "INSERT OR IGNORE INTO quiz_answers (digest_id, question, answer, "
+            "created_at) VALUES (?,?,?,?)",
             (digest_id, question, answer, to_iso(now)),
         )
 
-        return None
+        return StoreError.CONFLICT if changed == 0 else None
 
     async def list_feedback_since(self, since: datetime) -> list[Feedback]:
         rows = await self._db.fetch_all(

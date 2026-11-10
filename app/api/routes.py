@@ -1,11 +1,11 @@
 import asyncio
-from datetime import datetime
 from datetime import timedelta
 from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter
 from fastapi import Depends
+from fastapi import Form
 from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
@@ -17,19 +17,17 @@ from app.api import auth
 from app.context import AbstractContext
 from app.models import DeliveryStatus
 from app.models import DigestStyle
-from app.models import Feedback
 from app.models import FeedbackSignal
 from app.models import Interests
 from app.models import Model
 from app.models import Profile
-from app.models import QuizQuestion
 from app.models import Source
 from app.models import Thread
-from app.pipeline import feedback
-from app.pipeline import feedback_token
-from app.pipeline import quiz
+from app.pipeline import links
 from app.pipeline import run
+from app.pipeline.links import LinkError
 from app.repositories import StoreError
+from app.result import OnSuccess
 from app.result import ServiceError
 from app.result import is_error
 
@@ -37,8 +35,6 @@ logger = logging.get_logger(__name__)
 
 _DEFAULT_DIGEST_LIMIT = 10
 _MAX_DIGEST_LIMIT = 50
-_SIGNALS = {signal.value for signal in FeedbackSignal}
-_QUESTIONS = {question.value for question in QuizQuestion}
 
 router = APIRouter()
 owner = APIRouter(prefix="/api", dependencies=[Depends(auth.require_owner)])
@@ -161,154 +157,141 @@ async def health() -> HealthResponse:
     return HealthResponse(ok=True, service="ai-infra-daily")
 
 
-async def _feedback_targets_exist(
-    ctx: AbstractContext,
-    digest_id: str,
-    event_id: str | None,
-    source_id: str | None,
-    item_id: str | None,
-) -> bool:
-    """The feedback table has foreign keys, so unknown ids are rejected up front."""
-    if is_error(await ctx.digests.find_by_id(digest_id)):
-        return False
+_STYLE = (
+    "body{font-family:Georgia,serif;max-width:32rem;margin:4rem auto;padding:0 1rem;"
+    "color:#1f2933}button{font:inherit;padding:.4rem 1.2rem;cursor:pointer}"
+)
+_SIGNAL_LABELS = {
+    FeedbackSignal.MORE_LIKE_THIS.value: "Show more stories like this one.",
+    FeedbackSignal.LESS_LIKE_THIS.value: "Show fewer stories like this one.",
+    FeedbackSignal.MUTE_SOURCE.value: "Stop using the source of this story.",
+    FeedbackSignal.PIN_THREAD.value: "Keep following this story every day.",
+}
+_LINK_PAGES: dict[LinkError, tuple[str, str, int]] = {
+    LinkError.INVALID: ("Invalid link", "This link is not valid.", 400),
+    LinkError.EXPIRED: ("Link expired", "This link has expired.", 400),
+    LinkError.UNKNOWN_TARGET: (
+        "Invalid link",
+        "This link points at content that no longer exists.",
+        400,
+    ),
+    LinkError.ALREADY_APPLIED: (
+        "Already done",
+        "This link was used before; nothing changed.",
+        200,
+    ),
+    LinkError.FAILED: ("Something went wrong", "Nothing was changed.", 500),
+}
 
-    if event_id is not None and is_error(await ctx.events.find_by_id(event_id)):
-        return False
 
-    if source_id is not None and is_error(await ctx.sources.find_by_id(source_id)):
-        return False
+def _confirm_page(
+    action: str, description: str, fields: dict[str, str]
+) -> HTMLResponse:
+    """Email links only show this page; the change happens when the owner presses the
+    button, so mail scanners that open every link change nothing."""
+    hidden = "".join(
+        f'<input type="hidden" name="{escape(name)}" value="{escape(value)}">'
+        for name, value in fields.items()
+    )
+    html = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="robots" content="noindex">'
+        f"<title>Confirm</title><style>{_STYLE}</style></head><body>"
+        f"<h1>Confirm</h1><p>{escape(description)}</p>"
+        f'<form method="post" action="{escape(action)}">{hidden}'
+        '<button type="submit">Confirm</button></form></body></html>'
+    )
 
-    return item_id is None or len(await ctx.items.find_by_ids([item_id])) == 1
+    return HTMLResponse(html)
+
+
+def _link_result(result: OnSuccess[str]) -> HTMLResponse:
+    if isinstance(result, LinkError):
+        title, body, status = _LINK_PAGES[result]
+
+        return _page(title, body, status=status)
+
+    if is_error(result):
+        title, body, status = _LINK_PAGES[LinkError.FAILED]
+
+        return _page(title, body, status=status)
+
+    return _page("Thanks, noted", result)
 
 
 @router.get("/feedback", response_class=HTMLResponse)
-async def feedback_link(
-    ctx: Ctx,
+async def confirm_feedback(
     *,
     token: str = "",
     signal: str = "",
-    event: str | None = None,
-    source: str | None = None,
-    item: str | None = None,
+    event: str = "",
+    source: str = "",
+    item: str = "",
 ) -> HTMLResponse:
-    if token == "" or signal not in _SIGNALS:
-        return _page(
-            "Invalid feedback link",
-            "This link is missing required parameters.",
-            status=400,
-        )
-
-    now = ctx.clock.now()
-    claims = feedback_token.verify(settings.FEEDBACK_SECRET, token, now=now)
-
-    if is_error(claims):
-        return _page(
-            "Invalid feedback link", "This link is invalid or has expired.", status=400
-        )
-
-    if not await _feedback_targets_exist(ctx, claims.digest_id, event, source, item):
-        return _page(
-            "Invalid feedback link", "This link points at unknown content.", status=400
-        )
-
-    received = Feedback(
-        created_at=now,
-        digest_id=claims.digest_id,
-        event_id=event,
-        item_id=item,
-        source_id=source,
-        signal=FeedbackSignal(signal),
-    )
-    interests = await ctx.preferences.interests()
-    outcome = await feedback.apply_feedback(ctx, received, interests)
-
-    if is_error(outcome):
-        logger.error(
-            "Applying feedback failed.", extra={"error": str(outcome), "signal": signal}
-        )
-
-        return _page(
-            "Something went wrong", "Your feedback could not be recorded.", status=500
-        )
-
-    await ctx.preferences.save_interests(outcome.interests, now=now)
-    logger.info(
-        "Feedback recorded.",
-        extra={"signal": signal, "event_id": event, "source_id": source},
+    return _confirm_page(
+        "/feedback",
+        _SIGNAL_LABELS.get(signal, "Apply this feedback."),
+        {
+            "token": token,
+            "signal": signal,
+            "event": event,
+            "source": source,
+            "item": item,
+        },
     )
 
-    return _page("Thanks, noted", "Tomorrow's digest will take this into account.")
 
-
-async def _digest_for_token(
-    ctx: AbstractContext, token: str, *, now: datetime
-) -> str | None:
-    claims = feedback_token.verify(settings.FEEDBACK_SECRET, token, now=now)
-
-    if is_error(claims) or is_error(await ctx.digests.find_by_id(claims.digest_id)):
-        return None
-
-    return claims.digest_id
-
-
-def _quiz_error_page(error: ServiceError) -> HTMLResponse:
-    match error:
-        case quiz.QuizError.ALREADY_ANSWERED:
-            return _page(
-                "Already answered",
-                "This question was answered before; the first answer stands.",
-            )
-        case quiz.QuizError.INVALID:
-            return _page(
-                "Invalid quiz link", "That is not one of the options.", status=400
-            )
-        case _:
-            logger.error("Applying a quiz answer failed.", extra={"error": str(error)})
-
-            return _page(
-                "Something went wrong", "Your answer could not be recorded.", status=500
-            )
+@router.post("/feedback", response_class=HTMLResponse)
+async def apply_feedback(
+    *,
+    ctx: Ctx,
+    token: Annotated[str, Form()] = "",
+    signal: Annotated[str, Form()] = "",
+    event: Annotated[str, Form()] = "",
+    source: Annotated[str, Form()] = "",
+    item: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    return _link_result(
+        await links.apply_feedback_link(
+            ctx,
+            secret=settings.FEEDBACK_SECRET,
+            token=token,
+            signal=signal,
+            event_id=event or None,
+            source_id=source or None,
+            item_id=item or None,
+        )
+    )
 
 
 @router.get("/quiz", response_class=HTMLResponse)
-async def quiz_link(
-    ctx: Ctx, *, token: str = "", question: str = "", answer: str = ""
+async def confirm_quiz(
+    *, token: str = "", question: str = "", answer: str = ""
 ) -> HTMLResponse:
-    if token == "" or question not in _QUESTIONS or answer == "":
-        return _page(
-            "Invalid quiz link", "This link is missing required parameters.", status=400
-        )
-
-    now = ctx.clock.now()
-    digest_id = await _digest_for_token(ctx, token, now=now)
-
-    if digest_id is None:
-        return _page(
-            "Invalid quiz link", "This link is invalid or has expired.", status=400
-        )
-
-    profile = await ctx.preferences.profile()
-    interests = await ctx.preferences.interests()
-    outcome = await quiz.apply_answer(
-        ctx,
-        digest_id=digest_id,
-        question=QuizQuestion(question),
-        answer=answer,
-        profile=profile,
-        interests=interests,
-        now=now,
+    return _confirm_page(
+        "/quiz",
+        "Save this answer for tomorrow's digest.",
+        {"token": token, "question": question, "answer": answer},
     )
 
-    if is_error(outcome):
-        return _quiz_error_page(outcome)
 
-    if outcome.profile != profile:
-        await ctx.preferences.save_profile(outcome.profile, now=now)
-
-    if outcome.interests != interests:
-        await ctx.preferences.save_interests(outcome.interests, now=now)
-
-    return _page("Thanks, noted", outcome.message)
+@router.post("/quiz", response_class=HTMLResponse)
+async def apply_quiz(
+    *,
+    ctx: Ctx,
+    token: Annotated[str, Form()] = "",
+    question: Annotated[str, Form()] = "",
+    answer: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    return _link_result(
+        await links.apply_quiz_link(
+            ctx,
+            secret=settings.FEEDBACK_SECRET,
+            token=token,
+            question=question,
+            answer=answer,
+        )
+    )
 
 
 @owner.get("/sources")

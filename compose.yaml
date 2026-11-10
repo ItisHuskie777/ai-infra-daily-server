@@ -6,6 +6,9 @@ x-aid: &aid
   build:
     context: .
     dockerfile: deploy/Dockerfile
+    args:
+      # The id of the host user that owns ./data (`id -u`).
+      AID_UID: ${AID_UID:-1000}
   image: aid:latest
   env_file:
     - .env
@@ -17,6 +20,8 @@ x-aid: &aid
   volumes:
     - ./data:/srv/aid/data
   init: true
+  security_opt:
+    - no-new-privileges:true
   # The embedding model peaks near 3 GB; the cap protects whatever else the host runs.
   mem_limit: 6g
 

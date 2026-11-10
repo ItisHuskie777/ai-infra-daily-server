@@ -30,6 +30,9 @@ LOG_LEVEL = os.environ["LOG_LEVEL"]
 MAX_ITEMS_PER_SOURCE = 40
 SOURCE_FETCH_CONCURRENCY = 8
 SOURCE_FETCH_TIMEOUT_SECONDS = 15.0
+# Whole-source deadline: an adapter making several requests stops after this.
+SOURCE_DEADLINE_SECONDS = 120.0
+MAX_RESPONSE_BYTES = 10_000_000
 EVENT_WINDOW_HOURS = 72
 THREAD_INACTIVE_DAYS = 7
 # Calibrated on 374 real items embedded with BAAI/bge-m3: reports of one event from

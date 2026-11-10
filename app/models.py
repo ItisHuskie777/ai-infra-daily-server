@@ -87,6 +87,7 @@ class Topic(StrEnum):
 
 class QuizQuestion(StrEnum):
     TOPICS = "topics"
+    FEWER_TOPICS = "fewer_topics"
     LENGTH = "length"
     DEPTH = "depth"
 

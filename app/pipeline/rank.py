@@ -15,6 +15,7 @@ from app.models import RankedEvent
 from app.models import Source
 from app.models import Thread
 from app.models import Topic
+from app.pipeline import _untrusted
 from app.pipeline import recommend
 from app.pipeline.select import engagement_value
 from app.result import OnSuccess
@@ -35,7 +36,8 @@ _RANK_SYSTEM_PROMPT = (
     "how much the event matters to a practitioner who follows AI models, "
     "infrastructure and tooling. Also tag each event with one or two topics from the "
     "list given, using the topic keys exactly; put first the topic that says what "
-    "kind of news the event is, since it decides the event's category."
+    "kind of news the event is, since it decides the event's category. "
+    + _untrusted.RULE
 )
 _MAX_TOPICS_PER_EVENT = 2
 _TOPIC_VALUES = frozenset(topic.value for topic in Topic)
@@ -70,15 +72,16 @@ def _describe_list(label: str, values: Sequence[str]) -> str:
 
 def _describe_event(event: EventWithItems, sources: Mapping[str, Source]) -> str:
     lines = [
-        f"Event {event.id}: {event.title}",
-        f"  Summary: {event.summary[:_SUMMARY_LIMIT]}",
+        f"Event {event.id}: {_untrusted.fence(event.title)}",
+        f"  Summary: {_untrusted.fence(event.summary[:_SUMMARY_LIMIT])}",
     ]
 
     for item in event.items[:_ITEMS_PER_EVENT_IN_PROMPT]:
         source = sources[item.source_id].name if item.source_id in sources else None
         author = "" if item.author is None else f", {item.author}"
         lines.append(
-            f"  - [{item.kind}] {item.title} ({source or item.source_id}{author})"
+            f"  - [{item.kind}] {_untrusted.fence(item.title)} "
+            f"({source or item.source_id}{_untrusted.fence(author)})"
         )
 
     return "\n".join(lines)

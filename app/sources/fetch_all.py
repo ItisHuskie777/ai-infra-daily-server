@@ -57,9 +57,16 @@ async def _fetch_one(
         # NOTE: Adapter boundary; a vendor exception becomes a value so siblings keep
         # running (FR1.5).
         try:
-            fetched = await adapter.fetch(ctx, source)
+            async with asyncio.timeout(settings.SOURCE_DEADLINE_SECONDS):
+                fetched = await adapter.fetch(ctx, source)
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            logger.warning(
+                "Source fetch hit its deadline.", extra={"source": source.id}
+            )
+
+            return _Settled(error=str(FetchError.FETCH_FAILED), detail="deadline")
         except Exception as cause:
             logger.exception("Source adapter raised.", extra={"source": source.id})
 

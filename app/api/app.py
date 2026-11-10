@@ -49,5 +49,11 @@ def create_app() -> FastAPI:
 def serve(*, host: str, port: int) -> None:
     """Blocks; uvicorn owns the event loop, so this is called from the CLI only."""
     uvicorn.run(
-        "app.api.app:create_app", factory=True, host=host, port=port, log_config=None
+        "app.api.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        log_config=None,
+        # NOTE: Access lines carry the query string, and email links carry tokens.
+        access_log=False,
     )

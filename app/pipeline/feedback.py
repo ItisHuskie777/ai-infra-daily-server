@@ -108,6 +108,7 @@ type _Direction = Literal["more", "less"]
 class FeedbackError(ServiceError):
     NOT_FOUND = "not_found"
     INVALID = "invalid"
+    ALREADY_APPLIED = "already_applied"
 
     @override
     def service(self) -> str:
@@ -343,8 +344,9 @@ async def apply_feedback(
     ctx: AbstractContext, feedback: Feedback, interests: Interests
 ) -> OnSuccess[FeedbackOutcome]:
     """Records the feedback first so a later failure never loses the signal (FR7.2);
-    the caller persists the returned interests."""
-    await ctx.digests.record_feedback(feedback)
+    a link that already acted changes nothing. The caller persists the interests."""
+    if is_error(await ctx.digests.record_feedback(feedback)):
+        return FeedbackError.ALREADY_APPLIED
 
     match feedback.signal:
         case FeedbackSignal.MORE_LIKE_THIS:

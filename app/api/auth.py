@@ -10,7 +10,8 @@ _SCHEME = "Bearer "
 
 
 def _is_owner(authorization: str) -> bool:
-    if not authorization.startswith(_SCHEME):
+    # NOTE: An empty OWNER_TOKEN switches the owner API off rather than opening it.
+    if settings.OWNER_TOKEN == "" or not authorization.startswith(_SCHEME):
         return False
 
     return hmac.compare_digest(

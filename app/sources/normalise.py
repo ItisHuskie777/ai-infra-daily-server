@@ -56,6 +56,7 @@ _TAG = re.compile(r"<[^>]+>")
 _HORIZONTAL_SPACE = re.compile("[ \\t\\u00a0]+")
 _LINE_SPACE = re.compile(r"\s*\n\s*")
 _TITLE_MAX_LENGTH = 120
+_WEB_SCHEMES = frozenset({"http", "https"})
 
 
 class NormaliseError(ServiceError):
@@ -91,6 +92,10 @@ def canonicalise_url(url: str) -> str:
     return urlunsplit(
         (parts.scheme.lower(), parts.netloc.lower(), path, urlencode(kept), "")
     )
+
+
+def _is_web_link(url: str) -> bool:
+    return urlsplit(url.strip()).scheme.lower() in _WEB_SCHEMES
 
 
 def item_id_for(canonical_url: str) -> str:
@@ -174,6 +179,10 @@ def build_item(
     """`canonical_source` is the content URL when the discussion page differs from
     the thing it points at; `language_hint` applies when detection is inconclusive."""
     canonical_url = canonicalise_url(canonical_source or url)
+
+    # NOTE: Links go into the email as hrefs; only web links are kept.
+    if not (_is_web_link(url) and _is_web_link(canonical_url)):
+        return NormaliseError.INVALID_ITEM
     detected = detect_language(f"{title}\n{text}")
     language = detected
 

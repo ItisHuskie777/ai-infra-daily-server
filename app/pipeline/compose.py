@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlencode
@@ -15,8 +16,12 @@ from app.models import Model
 from app.models import SourceHealth
 from app.models import StoredItem
 from app.models import Thread
+from app.pipeline import feedback_token
 from app.pipeline.quiz import Quiz
 from app.pipeline.summarise import EventSummary
+
+type LinkSigner = Callable[[str], str]
+"""Returns the token for one link, given the scope that link is allowed to act on."""
 
 _DIGEST_NAME = "AI Infra Daily"
 _TEMPLATES = Path(__file__).resolve().parents[2] / "templates"
@@ -124,26 +129,31 @@ def _primary_item(placement: DigestEventPlacement) -> StoredItem | None:
 
 def _feedback_url(
     base_url: str,
-    token: str,
+    sign: LinkSigner,
     signal: FeedbackSignal,
     event: ComposedEvent,
     primary: StoredItem | None,
 ) -> str:
+    event_id = event.placement.event.id
+    source_id = None if primary is None else primary.source_id
+    item_id = None if primary is None else primary.id
     parameters = {
-        "token": token,
+        "token": sign(
+            feedback_token.feedback_scope(signal.value, event_id, source_id, item_id)
+        ),
         "signal": signal.value,
-        "event": event.placement.event.id,
+        "event": event_id,
     }
 
-    if primary is not None:
-        parameters["source"] = primary.source_id
-        parameters["item"] = primary.id
+    if source_id is not None and item_id is not None:
+        parameters["source"] = source_id
+        parameters["item"] = item_id
 
     return f"{base_url}/feedback?{urlencode(parameters)}"
 
 
 def _feedback_links(
-    base_url: str, token: str, event: ComposedEvent, primary: StoredItem | None
+    base_url: str, sign: LinkSigner, event: ComposedEvent, primary: StoredItem | None
 ) -> tuple[_FeedbackLink, ...]:
     # NOTE: Two links per event double the size of a compact digest of sixty events,
     # past the point where mail clients clip the message; the quiz collects taste.
@@ -162,7 +172,7 @@ def _feedback_links(
     return tuple(
         _FeedbackLink(
             label=_FEEDBACK_LABELS[signal],
-            url=_feedback_url(base_url, token, signal, event, primary),
+            url=_feedback_url(base_url, sign, signal, event, primary),
         )
         for signal in signals
     )
@@ -175,7 +185,7 @@ def _day_badge(thread: Thread | None) -> str | None:
     return f"Day {thread.day_count} of this story"
 
 
-def _event_view(event: ComposedEvent, *, base_url: str, token: str) -> _EventView:
+def _event_view(event: ComposedEvent, *, base_url: str, sign: LinkSigner) -> _EventView:
     primary = _primary_item(event.placement)
 
     return _EventView(
@@ -194,7 +204,7 @@ def _event_view(event: ComposedEvent, *, base_url: str, token: str) -> _EventVie
             )
             for take in event.summary.takes
         ),
-        feedback=_feedback_links(base_url, token, event, primary),
+        feedback=_feedback_links(base_url, sign, event, primary),
     )
 
 
@@ -205,7 +215,7 @@ def _subject_for(date: str, title: str | None) -> str:
     return f"{_DIGEST_NAME} — {date} — {title}"
 
 
-def _quiz_view(quiz: Quiz, *, base_url: str, token: str) -> _QuizView:
+def _quiz_view(quiz: Quiz, *, base_url: str, sign: LinkSigner) -> _QuizView:
     return _QuizView(
         prompt=quiz.prompt,
         options=tuple(
@@ -214,7 +224,11 @@ def _quiz_view(quiz: Quiz, *, base_url: str, token: str) -> _QuizView:
                 url=f"{base_url}/quiz?"
                 + urlencode(
                     {
-                        "token": token,
+                        "token": sign(
+                            feedback_token.quiz_scope(
+                                quiz.question.value, option.answer
+                            )
+                        ),
                         "question": quiz.question.value,
                         "answer": option.answer,
                     }
@@ -232,7 +246,7 @@ def compose_digest_html(
     sections: Sequence[ComposedSection],
     health: Sequence[SourceHealth],
     feedback_base_url: str,
-    feedback_token: str,
+    sign_link: LinkSigner,
     quizzes: Sequence[Quiz] = (),
 ) -> ComposedDigest:
     ordered = _ordered_sections(sections)
@@ -250,7 +264,7 @@ def compose_digest_html(
         _SectionView(
             title=_SECTION_TITLES[section.section],
             events=tuple(
-                _event_view(event, base_url=base_url, token=feedback_token)
+                _event_view(event, base_url=base_url, sign=sign_link)
                 for event in section.events
             ),
         )
@@ -264,8 +278,7 @@ def compose_digest_html(
         style=style.value,
         sections=views,
         quizzes=[
-            _quiz_view(quiz, base_url=base_url, token=feedback_token)
-            for quiz in quizzes
+            _quiz_view(quiz, base_url=base_url, sign=sign_link) for quiz in quizzes
         ],
         health_total=len(health),
         health_ok=len(health) - len(failed),

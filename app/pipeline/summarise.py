@@ -15,6 +15,7 @@ from app.models import Language
 from app.models import Model
 from app.models import StoredItem
 from app.models import TechnicalDepth
+from app.pipeline import _untrusted
 from app.result import OnSuccess
 from app.result import ServiceError
 from app.result import is_error
@@ -26,7 +27,8 @@ _MAX_COMMENTS_PER_ITEM = 8
 _MAX_TITLE_LENGTH = 200
 _WHITESPACE = re.compile(r"\s+")
 _SYSTEM_PROMPT = (
-    "You are a careful editor producing a neutral summary of one AI news event."
+    "You are a careful editor producing a neutral summary of one AI news event. "
+    + _untrusted.RULE
 )
 
 # Summary length targets in English words; Chinese targets are twice this in characters.
@@ -143,16 +145,16 @@ def _top_comments(item: StoredItem) -> list[Comment]:
 
 def _describe_item(item: StoredItem) -> str:
     lines = [
-        f"- [{item.kind}] {item.title}",
-        f"  source: {item.source_id} | author: {item.author or 'unknown'} | "
-        f"language: {item.language}",
-        f"  text: {_excerpt(item.text)}",
+        f"- [{item.kind}] {_untrusted.fence(item.title)}",
+        f"  source: {item.source_id} | author: "
+        f"{_untrusted.fence(item.author or 'unknown')} | language: {item.language}",
+        f"  text: {_untrusted.fence(_excerpt(item.text))}",
     ]
 
     for comment in _top_comments(item):
-        author = comment.author or "anonymous"
+        author = _untrusted.fence(comment.author or "anonymous")
         score = "" if comment.score is None else f" (score {comment.score})"
-        text = _normalise_whitespace(comment.text)
+        text = _untrusted.fence(_normalise_whitespace(comment.text))
         lines.append(f"  comment by {author}{score}: {text}")
 
     return "\n".join(lines)
@@ -217,7 +219,7 @@ def _build_prompt(
     return "\n".join(
         [
             "Summarise one news event for a personal AI-infrastructure digest.",
-            f"Event title: {placement.event.title}",
+            f"Event title: {_untrusted.fence(placement.event.title)}",
             "",
             "Rules:",
             f"- Write the title, summary and key claims in {output_language}.",

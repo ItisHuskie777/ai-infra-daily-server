@@ -26,8 +26,11 @@ class EmailError(ServiceError):
 
 class ImplementsEmail(ABC):
     @abstractmethod
-    async def send(self, *, to: str, subject: str, html: str) -> OnSuccess[str]:
-        """Returns the provider's message id."""
+    async def send(
+        self, *, to: str, subject: str, html: str, idempotency_key: str
+    ) -> OnSuccess[str]:
+        """Returns the provider's message id. A repeated key is not sent twice, so a
+        retry after a timeout that the provider did accept cannot duplicate the mail."""
 
 
 class ResendEmail(ImplementsEmail):
@@ -39,14 +42,19 @@ class ResendEmail(ImplementsEmail):
         self._sender = sender
 
     @override
-    async def send(self, *, to: str, subject: str, html: str) -> OnSuccess[str]:
+    async def send(
+        self, *, to: str, subject: str, html: str, idempotency_key: str
+    ) -> OnSuccess[str]:
         if self._api_key == "":
             return EmailError.NOT_CONFIGURED
 
         response = await self._http.post_json(
             _RESEND_ENDPOINT,
             {"from": self._sender, "to": [to], "subject": subject, "html": html},
-            headers={"authorization": f"Bearer {self._api_key}"},
+            headers={
+                "authorization": f"Bearer {self._api_key}",
+                "idempotency-key": idempotency_key,
+            },
             timeout_seconds=30.0,
         )
 

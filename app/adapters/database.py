@@ -27,7 +27,8 @@ class ImplementsDatabase(ABC):
     async def close(self) -> None: ...
 
     @abstractmethod
-    async def execute(self, sql: str, params: Params = ()) -> None: ...
+    async def execute(self, sql: str, params: Params = ()) -> int:
+        """Returns the number of rows the statement changed."""
 
     @abstractmethod
     async def execute_many(self, sql: str, rows: Iterable[Params]) -> None: ...
@@ -77,12 +78,14 @@ class SqliteDatabase(ImplementsDatabase):
         self._connection = None
 
     @override
-    async def execute(self, sql: str, params: Params = ()) -> None:
+    async def execute(self, sql: str, params: Params = ()) -> int:
         connection = await self._connected()
 
         async with self._lock:
-            await connection.execute(sql, tuple(params))
+            cursor = await connection.execute(sql, tuple(params))
             await connection.commit()
+
+        return cursor.rowcount
 
     @override
     async def execute_many(self, sql: str, rows: Iterable[Params]) -> None:

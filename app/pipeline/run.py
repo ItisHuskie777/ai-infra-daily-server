@@ -187,18 +187,23 @@ def _build_digest(
     sections: Sequence[ComposedSection],
     health: Sequence[SourceHealth],
 ) -> Digest:
-    token = feedback_token.sign(
-        settings.FEEDBACK_SECRET,
-        digest_id=digest_id,
-        expires_at=now + timedelta(days=settings.FEEDBACK_TOKEN_DAYS),
-    )
+    expires_at = now + timedelta(days=settings.FEEDBACK_TOKEN_DAYS)
+
+    def sign_link(scope: str) -> str:
+        return feedback_token.sign(
+            settings.FEEDBACK_SECRET,
+            digest_id=digest_id,
+            expires_at=expires_at,
+            scope=scope,
+        )
+
     composed = compose.compose_digest_html(
         date=date,
         style=profile.digest_style,
         sections=sections,
         health=health,
         feedback_base_url=settings.PUBLIC_BASE_URL,
-        feedback_token=token,
+        sign_link=sign_link,
         quizzes=quiz.build_quizzes(placements, date=date),
     )
 
@@ -246,7 +251,10 @@ async def _deliver(
         )
 
     sent = await ctx.email.send(
-        to=profile.email, subject=digest.subject, html=digest.html
+        to=profile.email,
+        subject=digest.subject,
+        html=digest.html,
+        idempotency_key=digest.id,
     )
 
     if is_error(sent):
