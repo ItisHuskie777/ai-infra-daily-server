@@ -122,6 +122,9 @@ class PlaywrightBrowser(ImplementsBrowser):
         async with self._lock:
             if self._browser is None:
                 self._playwright = await async_playwright().start()
+                # NOTE: Chromium's sandbox needs unprivileged user namespaces, which the
+                # host forbids inside a no-new-privileges container (tested 2026-11-10);
+                # the browser only starts when a session cookie is configured.
                 self._browser = await self._playwright.chromium.launch(headless=True)
 
             return self._browser
