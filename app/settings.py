@@ -56,11 +56,11 @@ THIN_CONTENT_CHARACTERS = 200
 THIN_CONTENT_FACTOR = 0.4
 # Events this close to one already chosen repeat a story; they are held back.
 REDUNDANCY_SIMILARITY_THRESHOLD = 0.66
-REDUNDANCY_FACTOR = 0.5
 DIVERSIFY_POOL_SIZE = 300
 # Events per category; a category with less news shows what it has.
 DIGEST_EVENTS_PER_CATEGORY = {"brief": 10, "balanced": 15, "deep": 20}
 SUMMARY_CONCURRENCY = 5
+RANK_CONCURRENCY = 4
 # A run normally takes 15-20 minutes; a lease older than this belongs to a dead run.
 RUN_LEASE_MINUTES = 90
 # Failed delivery attempts per local day before the run stops retrying until tomorrow.

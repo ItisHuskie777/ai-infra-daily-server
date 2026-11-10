@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import math
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -9,6 +11,7 @@ from app import logging
 from app import settings
 from app.adapters.embeddings import Vector
 from app.context import AbstractContext
+from app.models import EventScore
 from app.models import EventWithItems
 from app.models import Interests
 from app.models import RankedEvent
@@ -40,6 +43,17 @@ _RANK_SYSTEM_PROMPT = (
     + _untrusted.RULE
 )
 _MAX_TOPICS_PER_EVENT = 2
+_SIGNATURE_LENGTH = 24
+_PROFILE_FIELDS_SEEN_BY_MODEL = frozenset(
+    {
+        "topics",
+        "keywords_include",
+        "keywords_exclude",
+        "followed_authors",
+        "blocked_sources",
+        "technical_depth",
+    }
+)
 _TOPIC_VALUES = frozenset(topic.value for topic in Topic)
 _HEURISTIC_BASE = 0.3
 _HEURISTIC_PER_MATCH = 0.15
@@ -50,7 +64,9 @@ _HEURISTIC_PER_ENGAGEMENT_DECADE = 0.1
 
 class _EventScore(BaseModel):
     event_id: str = Field(min_length=1)
-    relevance: float = Field(ge=0, le=1)
+    # NOTE: Unbounded and clamped later, so one out-of-range score does not reject the
+    # whole sheet.
+    relevance: float
     rationale: str
     # NOTE: Plain strings, so one unknown tag does not invalidate the whole sheet.
     topics: list[str] = Field(default_factory=list)
@@ -64,6 +80,23 @@ class _Score(BaseModel):
     relevance: float
     rationale: str
     topics: tuple[Topic, ...] = ()
+    from_model: bool = True
+
+
+# Keyword cues for the heuristic fallback, so events keep a category without the model.
+_TOPIC_KEYWORDS: dict[Topic, tuple[str, ...]] = {
+    Topic.MODELS: ("model", "gpt", "claude", "gemini", "llama", "qwen", "release"),
+    Topic.INFERENCE: ("inference", "serving", "latency", "quantiz", "tok/s", "vllm"),
+    Topic.HARDWARE: ("gpu", "chip", "nvidia", "data center", "datacenter", "cuda"),
+    Topic.TRAINING: ("training", "fine-tun", "finetun", "pretrain", "rl "),
+    Topic.AGENTS: ("agent", "mcp", "tool use", "workflow"),
+    Topic.TOOLING: ("library", "sdk", "cli", "framework", "open-source tool"),
+    Topic.RESEARCH: ("paper", "arxiv", "benchmark", "study"),
+    Topic.OPEN_SOURCE: ("open-weight", "open weight", "open source", "hugging face"),
+    Topic.POLICY: ("policy", "regulat", "law", "election", "safety", "lawsuit"),
+    Topic.BUSINESS: ("funding", "raises", "acquire", "valuation", "ipo", "revenue"),
+    Topic.PRODUCTS: ("launch", "app", "feature", "users"),
+}
 
 
 def _describe_list(label: str, values: Sequence[str]) -> str:
@@ -163,12 +196,28 @@ def _heuristic_score(event: EventWithItems, interests: Interests) -> _Score:
     )
 
     return _Score(
-        relevance=min(1.0, max(0.0, relevance)),
+        relevance=_clamped(relevance),
         rationale=(
             f"Heuristic score (model unavailable): {matches} keyword matches, "
             f"{excluded} excluded keywords, engagement {engagement}."
         ),
+        topics=_heuristic_topics(text),
+        from_model=False,
     )
+
+
+def _clamped(relevance: float) -> float:
+    return min(1.0, max(0.0, relevance))
+
+
+def _heuristic_topics(text: str) -> tuple[Topic, ...]:
+    hits = [
+        (sum(text.count(cue) for cue in cues), topic)
+        for topic, cues in _TOPIC_KEYWORDS.items()
+    ]
+    ordered = sorted((hit for hit in hits if hit[0] > 0), key=lambda hit: -hit[0])
+
+    return tuple(topic for _, topic in ordered[:_MAX_TOPICS_PER_EVENT])
 
 
 async def _score_batch(
@@ -194,7 +243,7 @@ async def _score_batch(
 
     scores = {
         score.event_id: _Score(
-            relevance=score.relevance,
+            relevance=_clamped(score.relevance),
             rationale=score.rationale,
             topics=_known_topics(score.topics),
         )
@@ -210,6 +259,85 @@ async def _score_batch(
             scores[event.id] = _heuristic_score(event, interests)
 
     return scores
+
+
+def _signature(event: EventWithItems, interests: Interests) -> str:
+    """Changes when the event gains or loses items or the profile the model reads
+    changes; topic weights are applied after the model and are left out."""
+    profile = interests.model_dump_json(include=set(_PROFILE_FIELDS_SEEN_BY_MODEL))
+    material = "\n".join([*sorted(item.id for item in event.items), profile])
+
+    return hashlib.sha256(material.encode()).hexdigest()[:_SIGNATURE_LENGTH]
+
+
+async def _score_all(
+    ctx: AbstractContext,
+    interests: Interests,
+    events: Sequence[EventWithItems],
+    sources: Mapping[str, Source],
+) -> dict[str, _Score]:
+    """Reuses stored scores for unchanged events and scores the rest in concurrent
+    batches; only scores that came from the model are stored."""
+    signatures = {event.id: _signature(event, interests) for event in events}
+    cached = await ctx.events.scores(list(signatures))
+    scores = {
+        event_id: _Score(
+            relevance=stored.relevance,
+            rationale=stored.rationale,
+            topics=stored.topics,
+        )
+        for event_id, stored in cached.items()
+        if stored.signature == signatures[event_id]
+    }
+    pending = [event for event in events if event.id not in scores]
+    semaphore = asyncio.Semaphore(settings.RANK_CONCURRENCY)
+
+    async def scored(batch: Sequence[EventWithItems]) -> dict[str, _Score]:
+        async with semaphore:
+            return await _score_batch(ctx, interests, batch, sources)
+
+    batches = [
+        pending[start : start + _RANK_BATCH_SIZE]
+        for start in range(0, len(pending), _RANK_BATCH_SIZE)
+    ]
+
+    for fresh in await asyncio.gather(*(scored(batch) for batch in batches)):
+        scores.update(fresh)
+
+    await ctx.events.save_scores(
+        {
+            event.id: EventScore(
+                relevance=scores[event.id].relevance,
+                rationale=scores[event.id].rationale,
+                topics=scores[event.id].topics,
+                signature=signatures[event.id],
+            )
+            for event in pending
+            if scores[event.id].from_model
+        }
+    )
+    logger.info(
+        "Scored events.",
+        extra={"events": len(events), "reused": len(events) - len(pending)},
+    )
+
+    return scores
+
+
+def _without_blocked(
+    events: Sequence[EventWithItems], blocked: set[str]
+) -> list[EventWithItems]:
+    """Items from blocked sources are removed before scoring and display; an event left
+    with nothing is dropped."""
+    kept: list[EventWithItems] = []
+
+    for event in events:
+        items = tuple(item for item in event.items if item.source_id not in blocked)
+
+        if len(items) > 0:
+            kept.append(event.model_copy(update={"items": items}))
+
+    return kept
 
 
 async def _load_threads(
@@ -263,22 +391,12 @@ async def rank_events(
     covered only by blocked sources (FR5.1). A model failure degrades to heuristic
     scores."""
     sources_by_id = {source.id: source for source in sources}
-    blocked = _blocked_source_ids(interests, sources)
-    eligible = [
-        event
-        for event in events
-        if len(event.items) > 0
-        and any(item.source_id not in blocked for item in event.items)
-    ]
+    eligible = _without_blocked(events, _blocked_source_ids(interests, sources))
 
     if len(eligible) == 0:
         return []
 
-    scores: dict[str, _Score] = {}
-
-    for start in range(0, len(eligible), _RANK_BATCH_SIZE):
-        batch = eligible[start : start + _RANK_BATCH_SIZE]
-        scores.update(await _score_batch(ctx, interests, batch, sources_by_id))
+    scores = await _score_all(ctx, interests, eligible, sources_by_id)
 
     threads = await _load_threads(ctx, eligible)
     now = ctx.clock.now()

@@ -234,6 +234,16 @@ class EventWithItems(Event):
     items: tuple[StoredItem, ...]
 
 
+class EventScore(Model):
+    """The model's judgement of one event, kept until the event or the interest profile
+    changes (`signature`)."""
+
+    relevance: float
+    rationale: str
+    topics: tuple[Topic, ...]
+    signature: str
+
+
 class RankedEvent(EventWithItems):
     relevance_score: float
     rationale: str

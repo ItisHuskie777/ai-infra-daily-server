@@ -1,11 +1,15 @@
+from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 
 from app.adapters.database import ImplementsDatabase
 from app.adapters.database import Row
 from app.models import Event
+from app.models import EventScore
 from app.models import EventWithItems
 from app.repositories._common import StoreError
 from app.repositories._common import from_iso
+from app.repositories._common import placeholders
 from app.repositories._common import to_iso
 from app.repositories.items import ItemRepository
 from app.result import OnSuccess
@@ -45,6 +49,27 @@ class EventRepository:
                 event.centroid_item_id,
                 event.id,
             ),
+        )
+
+    async def scores(self, event_ids: Sequence[str]) -> dict[str, EventScore]:
+        if len(event_ids) == 0:
+            return {}
+
+        rows = await self._db.fetch_all(
+            "SELECT id, score_json FROM events WHERE score_json IS NOT NULL "
+            f"AND id IN ({placeholders(len(event_ids))})",
+            tuple(event_ids),
+        )
+
+        return {
+            str(row["id"]): EventScore.model_validate_json(str(row["score_json"]))
+            for row in rows
+        }
+
+    async def save_scores(self, scores: Mapping[str, EventScore]) -> None:
+        await self._db.execute_many(
+            "UPDATE events SET score_json = ? WHERE id = ?",
+            [(score.model_dump_json(), event_id) for event_id, score in scores.items()],
         )
 
     async def find_by_id(self, event_id: str) -> OnSuccess[EventWithItems]:

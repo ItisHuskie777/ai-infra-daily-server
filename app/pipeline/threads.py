@@ -189,30 +189,40 @@ async def _embed_event(ctx: AbstractContext, event: Event) -> Vector:
     return vectors[0]
 
 
-async def _thread_text(ctx: AbstractContext, thread: Thread) -> str:
+async def _stored_thread_vector(ctx: AbstractContext, thread: Thread) -> Vector | None:
+    """The vector of the latest event's centroid item, already in the database."""
     events = await ctx.events.list_by_thread(thread.id)
+    latest = max(events, key=lambda event: event.updated_at, default=None)
 
-    if len(events) == 0:
-        return f"{thread.title}\n"
+    if latest is None or latest.centroid_item_id is None:
+        return None
 
-    latest = max(events, key=lambda event: event.updated_at)
-
-    return f"{thread.title}\n{latest.summary or latest.title}"
+    return await ctx.items.find_embedding(latest.centroid_item_id)
 
 
 async def _load_active_candidates(ctx: AbstractContext, state: _LinkState) -> None:
-    since = ctx.clock.now() - timedelta(days=settings.THREAD_INACTIVE_DAYS)
-    active = await ctx.threads.list_active(since=since)
+    """Uses stored vectors; only a thread without one has its title embedded."""
+    active = await ctx.threads.list_active(since=inactive_since(ctx.clock.now()))
+    missing: list[Thread] = []
 
-    if len(active) == 0:
-        return
-
-    texts = [await _thread_text(ctx, thread) for thread in active]
-    vectors = await ctx.embeddings.embed(texts)
-
-    for thread, vector in zip(active, vectors, strict=True):
+    for thread in active:
         state.threads.setdefault(thread.id, thread)
+        vector = await _stored_thread_vector(ctx, thread)
+
+        if vector is None:
+            missing.append(thread)
+        else:
+            state.candidates.append(_Candidate(thread.id, vector))
+
+    vectors = await ctx.embeddings.embed([thread.title for thread in missing])
+
+    for thread, vector in zip(missing, vectors, strict=True):
         state.candidates.append(_Candidate(thread.id, vector))
+
+
+def inactive_since(now: datetime) -> datetime:
+    """Threads not seen since this moment are no longer active (FR4.2)."""
+    return now - timedelta(days=settings.THREAD_INACTIVE_DAYS)
 
 
 def _best_candidate(state: _LinkState, vector: Vector) -> str | None:

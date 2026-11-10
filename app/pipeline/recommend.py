@@ -136,46 +136,27 @@ def adjust_topic_weights(
     return adjusted
 
 
-def _repeats(event: RankedEvent, picked: Vector, vectors: Mapping[str, Vector]) -> bool:
-    vector = vectors.get(event.id)
-
-    return (
-        vector is not None
-        and cosine_similarity(vector, picked)
-        >= settings.REDUNDANCY_SIMILARITY_THRESHOLD
-    )
-
-
 def diversify(
     ranked: Sequence[RankedEvent], vectors: Mapping[str, Vector]
 ) -> list[RankedEvent]:
-    """Greedy re-ordering of the best candidates: each pick is the highest score left,
-    where an event that repeats a story already picked counts for less. Events beyond
-    the pool, and events without a vector, keep their order."""
-    pool = list(ranked[: settings.DIVERSIFY_POOL_SIZE])
-    redundant = [False] * len(pool)
-    remaining = list(range(len(pool)))
-    chosen: list[RankedEvent] = []
+    """Holds back repeats (FR5.5): walking down the ranking, an event too similar to one
+    already kept tells the same story and is dropped. Events beyond the pool, and
+    events without a vector, are kept as they are."""
+    kept: list[RankedEvent] = []
+    kept_vectors: list[Vector] = []
 
-    while len(remaining) > 0:
-        best = max(
-            remaining,
-            key=lambda index: (
-                pool[index].relevance_score
-                * (settings.REDUNDANCY_FACTOR if redundant[index] else 1.0),
-                -index,
-            ),
-        )
-        remaining.remove(best)
-        chosen.append(pool[best])
-        picked = vectors.get(pool[best].id)
+    for event in ranked[: settings.DIVERSIFY_POOL_SIZE]:
+        vector = vectors.get(event.id)
 
-        if picked is None:
+        if vector is not None and any(
+            cosine_similarity(vector, other) >= settings.REDUNDANCY_SIMILARITY_THRESHOLD
+            for other in kept_vectors
+        ):
             continue
 
-        for index in remaining:
-            redundant[index] = redundant[index] or _repeats(
-                pool[index], picked, vectors
-            )
+        kept.append(event)
 
-    return [*chosen, *ranked[settings.DIVERSIFY_POOL_SIZE :]]
+        if vector is not None:
+            kept_vectors.append(vector)
+
+    return [*kept, *ranked[settings.DIVERSIFY_POOL_SIZE :]]
