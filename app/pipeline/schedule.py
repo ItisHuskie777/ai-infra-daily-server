@@ -10,8 +10,8 @@ from app.models import Profile
 
 logger = logging.get_logger(__name__)
 
-_REASON_DELIVERY_HOUR = "delivery_hour"
-_REASON_NOT_DELIVERY_HOUR = "not_delivery_hour"
+_REASON_DUE = "due"
+_REASON_BEFORE_DELIVERY_HOUR = "before_delivery_hour"
 _REASON_ALREADY_SENT = "already_sent_today"
 
 
@@ -21,7 +21,7 @@ class ScheduleDecision(Model):
     reason: str
 
 
-def _zone_for(timezone: str) -> tzinfo:
+def zone_for(timezone: str) -> tzinfo:
     try:
         return ZoneInfo(timezone)
     except ZoneInfoNotFoundError, ValueError:
@@ -33,20 +33,26 @@ def _zone_for(timezone: str) -> tzinfo:
 
 
 def should_send_now(profile: Profile, now: datetime) -> ScheduleDecision:
-    """Called hourly: sends at the owner's delivery hour, at most once per local day."""
-    local = now.astimezone(_zone_for(profile.timezone))
+    """Called hourly: the digest is due from the owner's delivery hour until it has
+    gone out that local day, so a failed or missed run is retried the next hour and a
+    delivery hour skipped by a daylight-saving change is caught up."""
+    local = now.astimezone(zone_for(profile.timezone))
     local_date = local.strftime("%Y-%m-%d")
-
-    if local.hour != profile.delivery_hour:
-        return ScheduleDecision(
-            send=False, local_date=local_date, reason=_REASON_NOT_DELIVERY_HOUR
-        )
 
     if profile.last_digest_date == local_date:
         return ScheduleDecision(
             send=False, local_date=local_date, reason=_REASON_ALREADY_SENT
         )
 
-    return ScheduleDecision(
-        send=True, local_date=local_date, reason=_REASON_DELIVERY_HOUR
-    )
+    if local.hour < profile.delivery_hour:
+        return ScheduleDecision(
+            send=False, local_date=local_date, reason=_REASON_BEFORE_DELIVERY_HOUR
+        )
+
+    return ScheduleDecision(send=True, local_date=local_date, reason=_REASON_DUE)
+
+
+def start_of_local_day(timezone: str, now: datetime) -> datetime:
+    local = now.astimezone(zone_for(timezone))
+
+    return local.replace(hour=0, minute=0, second=0, microsecond=0)

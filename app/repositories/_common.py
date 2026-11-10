@@ -1,8 +1,11 @@
 import json
+from datetime import UTC
 from datetime import datetime
 from typing import override
 
 from app.result import ServiceError
+
+_ISO_UTC = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 class StoreError(ServiceError):
@@ -15,7 +18,8 @@ class StoreError(ServiceError):
 
 
 def to_iso(value: datetime) -> str:
-    return value.isoformat()
+    """UTC with a fixed width, so stored timestamps order correctly as text."""
+    return value.astimezone(UTC).strftime(_ISO_UTC)
 
 
 def from_iso(value: object) -> datetime:

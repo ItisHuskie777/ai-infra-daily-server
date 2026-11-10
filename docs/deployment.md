@@ -142,8 +142,12 @@ docker compose up -d
 
 ## Troubleshooting
 
-- `aid run` prints `not_delivery_hour` or `already_sent_today`: expected outside the
-  delivery hour; use `--force` to run anyway.
+- `aid run` prints `before_delivery_hour` or `already_sent_today`: expected; the digest
+  is due from the delivery hour until it has gone out that local day, so a failed run is
+  retried the next hour, up to three failed attempts a day. A digest that was built but
+  not delivered is resent as it is. Use `--force` to run anyway.
+- `another run is in progress`: a run already holds the pipeline lease; it expires after
+  90 minutes if that run died.
 - `every event summary failed`: the LLM is unreachable or `DEEPSEEK_API_KEY` is empty
   or wrong; nothing is sent.
 - `delivery failed: not_configured`: `RESEND_API_KEY` is empty.

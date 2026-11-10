@@ -111,8 +111,12 @@ async def _rank_and_select(
     await ctx.runs.set_stage(run_id, "rank")
     since = now - timedelta(hours=settings.EVENT_WINDOW_HOURS)
     events = await ctx.events.list_updated_since(since)
+    item_ids = [item.id for event in events for item in event.items]
+    already_sent = await ctx.items.filter_already_sent(item_ids)
     sources = await ctx.sources.list_all()
-    ranked = await rank.rank_events(ctx, interests, sources, events)
+    ranked = await rank.rank_events(
+        ctx, interests, sources, select.fresh_events(events, already_sent)
+    )
 
     if is_error(ranked):
         logger.error("Ranking failed.", extra={"error": str(ranked)})
@@ -120,8 +124,6 @@ async def _rank_and_select(
         return f"ranking failed: {ranked}"
 
     await ctx.runs.set_stage(run_id, "select")
-    item_ids = [item.id for entry in ranked for item in entry.items]
-    already_sent = await ctx.items.filter_already_sent(item_ids)
     pinned = await ctx.threads.list_pinned()
 
     return select.select_for_digest(
@@ -310,12 +312,16 @@ async def _stages(
         )
 
     await ctx.runs.set_stage(run_id, "compose")
+    # NOTE: Only summarised events are recorded, so an event whose summary failed is
+    # not counted as sent and can appear tomorrow.
     digest = _build_digest(
         digest_id=str(uuid.uuid4()),
         date=date,
         now=now,
         profile=profile,
-        placements=placements,
+        placements=[
+            event.placement for section in sections for event in section.events
+        ],
         sections=sections,
         health=health,
     )
@@ -326,12 +332,24 @@ async def _stages(
     return await _deliver(ctx, digest, now=now, profile=profile, dry_run=dry_run)
 
 
-async def _run(
-    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
-) -> RunOutcome:
-    now = ctx.clock.now()
-    profile = await ctx.preferences.profile()
-    interests = await ctx.preferences.interests()
+async def _resend_failed(
+    ctx: AbstractContext, *, date: str, now: datetime, profile: Profile
+) -> _Finished | None:
+    """A digest built today whose delivery failed is sent again as it is, without
+    spending another run of the model on it."""
+    existing = await ctx.digests.find_by_date(date)
+
+    if is_error(existing) or existing.delivery_status != DeliveryStatus.FAILED:
+        return None
+
+    logger.info("Resending today's undelivered digest.", extra={"digest": existing.id})
+
+    return await _deliver(ctx, existing, now=now, profile=profile, dry_run=False)
+
+
+async def _decide(
+    ctx: AbstractContext, *, now: datetime, profile: Profile, force: bool
+) -> schedule.ScheduleDecision | RunOutcome:
     decision = schedule.should_send_now(profile, now)
 
     if not force and not decision.send:
@@ -344,17 +362,64 @@ async def _run(
 
         return RunOutcome(digest_id=None, reason="no delivery email configured")
 
+    day_start = schedule.start_of_local_day(profile.timezone, now)
+    failures = await ctx.runs.count_failed_since(day_start)
+
+    if not force and failures >= settings.MAX_DAILY_DELIVERY_ATTEMPTS:
+        logger.warning(
+            "Run skipped: today's delivery attempts are used up.",
+            extra={"failures": failures},
+        )
+
+        return RunOutcome(digest_id=None, reason="delivery attempts used up today")
+
+    return decision
+
+
+async def _attempt(
+    ctx: AbstractContext,
+    run_id: str,
+    *,
+    now: datetime,
+    decision: schedule.ScheduleDecision,
+    profile: Profile,
+    dry_run: bool,
+) -> _Finished:
+    if not dry_run:
+        resent = await _resend_failed(
+            ctx, date=decision.local_date, now=now, profile=profile
+        )
+
+        if resent is not None:
+            return resent
+
+    return await _stages(
+        ctx,
+        run_id,
+        now=now,
+        date=decision.local_date,
+        profile=profile,
+        interests=await ctx.preferences.interests(),
+        dry_run=dry_run,
+    )
+
+
+async def _run_holding_lease(
+    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
+) -> RunOutcome:
+    now = ctx.clock.now()
+    await ctx.runs.abandon_unfinished(except_id=run_id, now=now)
+    profile = await ctx.preferences.profile()
+    decision = await _decide(ctx, now=now, profile=profile, force=force)
+
+    if isinstance(decision, RunOutcome):
+        return decision
+
     await ctx.runs.start(run_id, now=now)
 
     try:
-        finished = await _stages(
-            ctx,
-            run_id,
-            now=now,
-            date=decision.local_date,
-            profile=profile,
-            interests=interests,
-            dry_run=dry_run,
+        finished = await _attempt(
+            ctx, run_id, now=now, decision=decision, profile=profile, dry_run=dry_run
         )
     except asyncio.CancelledError:
         logger.warning("Pipeline run cancelled.")
@@ -392,6 +457,28 @@ async def _run(
     )
 
     return finished.outcome
+
+
+async def _run(
+    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
+) -> RunOutcome:
+    """Every run holds the pipeline lease, so the scheduler, the API and a one-off
+    command never build or send the same day's digest twice."""
+    acquired = await ctx.runs.acquire_lease(
+        run_id,
+        now=ctx.clock.now(),
+        duration=timedelta(minutes=settings.RUN_LEASE_MINUTES),
+    )
+
+    if not acquired:
+        logger.warning("Run skipped: another run holds the lease.")
+
+        return RunOutcome(digest_id=None, reason="another run is in progress")
+
+    try:
+        return await _run_holding_lease(ctx, run_id, force=force, dry_run=dry_run)
+    finally:
+        await ctx.runs.release_lease(run_id)
 
 
 def new_run_id() -> str:

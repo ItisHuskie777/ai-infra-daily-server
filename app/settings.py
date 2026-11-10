@@ -58,6 +58,13 @@ DIVERSIFY_POOL_SIZE = 300
 # Events per category; a category with less news shows what it has.
 DIGEST_EVENTS_PER_CATEGORY = {"brief": 10, "balanced": 15, "deep": 20}
 SUMMARY_CONCURRENCY = 5
+# A run normally takes 15-20 minutes; a lease older than this belongs to a dead run.
+RUN_LEASE_MINUTES = 90
+# Failed delivery attempts per local day before the run stops retrying until tomorrow.
+MAX_DAILY_DELIVERY_ATTEMPTS = 3
+# A story already sent comes back only with this many new items, or a new report from a
+# primary source or the media.
+FOLLOW_UP_MIN_NEW_ITEMS = 2
 # Events scoring below this are off-topic (for example unrelated front-page stories).
 MIN_RECOMMENDATION_SCORE = 0.05
 # Compact digests carry a title and a short summary per event; the full layout adds

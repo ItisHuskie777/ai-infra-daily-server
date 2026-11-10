@@ -5,6 +5,7 @@ from app import settings
 from app.models import DigestEventPlacement
 from app.models import DigestSection
 from app.models import DigestStyle
+from app.models import EventWithItems
 from app.models import ItemKind
 from app.models import Model
 from app.models import RankedEvent
@@ -69,6 +70,38 @@ def section_for(topics: Sequence[Topic]) -> DigestSection:
         return DigestSection.OTHER
 
     return _SECTION_OF_TOPIC[topics[0]]
+
+
+_REPORT_KINDS = frozenset({ItemKind.PRIMARY, ItemKind.MEDIA})
+
+
+def fresh_events(
+    events: Sequence[EventWithItems], already_sent_item_ids: set[str]
+) -> list[EventWithItems]:
+    """Events reduced to their unsent items (FR2.2). An event that was partly sent
+    before is a follow-up and returns only with enough new material: a new primary or
+    media report, or several new items; a single repost does not bring a story back."""
+    fresh: list[EventWithItems] = []
+
+    for event in events:
+        unsent = tuple(
+            item for item in event.items if item.id not in already_sent_item_ids
+        )
+
+        if len(unsent) == 0:
+            continue
+
+        is_follow_up = len(unsent) < len(event.items)
+        substantial = len(unsent) >= settings.FOLLOW_UP_MIN_NEW_ITEMS or any(
+            item.kind in _REPORT_KINDS for item in unsent
+        )
+
+        if is_follow_up and not substantial:
+            continue
+
+        fresh.append(event.model_copy(update={"items": unsent}))
+
+    return fresh
 
 
 def _by_section(
