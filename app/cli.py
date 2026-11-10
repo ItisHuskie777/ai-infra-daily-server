@@ -10,7 +10,9 @@ from app import context
 from app import logging
 from app import settings
 from app.api import app as api_app
-from app.context import Context
+from app.context import AbstractContext
+from app.models import SOURCE_WEIGHT_MAX
+from app.models import SOURCE_WEIGHT_MIN
 from app.models import DigestStyle
 from app.models import Interests
 from app.models import TechnicalDepth
@@ -25,7 +27,7 @@ from app.sources import fetch_all
 from app.sources import registry
 from app.sources import seeds
 
-type Command = Callable[[Context, argparse.Namespace], Awaitable[int]]
+type Command = Callable[[AbstractContext, argparse.Namespace], Awaitable[int]]
 
 logger = logging.get_logger(__name__)
 
@@ -33,7 +35,7 @@ _DIGEST_LIST_LIMIT = 20
 _PREVIEW_DIRECTORY = Path("data")
 
 
-async def _migrate(ctx: Context, args: argparse.Namespace) -> int:
+async def _migrate(ctx: AbstractContext, args: argparse.Namespace) -> int:
     applied = await ctx.database.migrate(settings.MIGRATIONS_DIRECTORY)
 
     if is_error(applied):
@@ -49,7 +51,7 @@ async def _migrate(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _seed(ctx: Context, args: argparse.Namespace) -> int:
+async def _seed(ctx: AbstractContext, args: argparse.Namespace) -> int:
     inserted = await seeds.seed_default_sources(ctx)
     print(f"seeded {inserted} new source(s)")
 
@@ -68,8 +70,10 @@ async def _write_preview(html: str, date: str) -> Path:
     return path
 
 
-async def _run(ctx: Context, args: argparse.Namespace) -> int:
-    outcome = await run.run_pipeline(ctx, force=args.force, dry_run=args.dry_run)
+async def _run(ctx: AbstractContext, args: argparse.Namespace) -> int:
+    outcome = await run.run_pipeline(
+        ctx, adapters=registry.ADAPTERS, force=args.force, dry_run=args.dry_run
+    )
 
     if outcome.preview_html is not None:
         path = await _write_preview(outcome.preview_html, f"{ctx.clock.now():%Y-%m-%d}")
@@ -82,7 +86,7 @@ async def _run(ctx: Context, args: argparse.Namespace) -> int:
     return 1 if outcome.failed else 0
 
 
-async def _stage(ctx: Context, args: argparse.Namespace) -> int:
+async def _stage(ctx: AbstractContext, args: argparse.Namespace) -> int:
     match args.name:
         case "fetch":
             sources = await ctx.sources.list_enabled()
@@ -117,7 +121,7 @@ async def _stage(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _sources(ctx: Context, args: argparse.Namespace) -> int:
+async def _sources(ctx: AbstractContext, args: argparse.Namespace) -> int:
     now = ctx.clock.now()
 
     match args.action:
@@ -134,6 +138,10 @@ async def _sources(ctx: Context, args: argparse.Namespace) -> int:
             result = await ctx.sources.set_enabled(
                 args.id, enabled=args.action == "enable", now=now
             )
+        case "weight" if not SOURCE_WEIGHT_MIN <= args.value <= SOURCE_WEIGHT_MAX:
+            print(f"weight must be between {SOURCE_WEIGHT_MIN} and {SOURCE_WEIGHT_MAX}")
+
+            return 1
         case "weight":
             result = await ctx.sources.set_weight(args.id, weight=args.value, now=now)
         case _:
@@ -191,7 +199,7 @@ def _edit_interests(interests: Interests, args: argparse.Namespace) -> Interests
     return interests.model_copy(update=update)
 
 
-async def _prefs(ctx: Context, args: argparse.Namespace) -> int:
+async def _prefs(ctx: AbstractContext, args: argparse.Namespace) -> int:
     now = ctx.clock.now()
     profile = await ctx.preferences.profile()
     interests = await ctx.preferences.interests()
@@ -225,14 +233,14 @@ async def _prefs(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _digests(ctx: Context, args: argparse.Namespace) -> int:
+async def _digests(ctx: AbstractContext, args: argparse.Namespace) -> int:
     for digest in await ctx.digests.list_recent(limit=_DIGEST_LIST_LIMIT):
         print(f"{digest.date} {digest.delivery_status:<8} {digest.id} {digest.subject}")
 
     return 0
 
 
-async def _set_pinned(ctx: Context, thread_id: str, *, pinned: bool) -> int:
+async def _set_pinned(ctx: AbstractContext, thread_id: str, *, pinned: bool) -> int:
     found = await ctx.threads.find_by_id(thread_id)
 
     if is_error(found):
@@ -247,7 +255,7 @@ async def _set_pinned(ctx: Context, thread_id: str, *, pinned: bool) -> int:
     return 0
 
 
-async def _threads(ctx: Context, args: argparse.Namespace) -> int:
+async def _threads(ctx: AbstractContext, args: argparse.Namespace) -> int:
     if args.action in {"pin", "unpin"}:
         return await _set_pinned(ctx, args.id, pinned=args.action == "pin")
 
@@ -263,7 +271,7 @@ async def _threads(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _maintain(ctx: Context, args: argparse.Namespace) -> int:
+async def _maintain(ctx: AbstractContext, args: argparse.Namespace) -> int:
     """Daily housekeeping, safe to run every hour: prunes, then backs up once a day."""
     now = ctx.clock.now()
     retention = timedelta(days=settings.RETENTION_DAYS)

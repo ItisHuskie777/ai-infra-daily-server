@@ -1,8 +1,9 @@
 import asyncio
-import uuid
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
+from typing import override
 
 from app import logging
 from app import settings
@@ -14,6 +15,7 @@ from app.models import DigestSection
 from app.models import Interests
 from app.models import Model
 from app.models import Profile
+from app.models import RunStatus
 from app.models import SourceHealth
 from app.pipeline import cluster
 from app.pipeline import compose
@@ -30,41 +32,56 @@ from app.pipeline.compose import ComposedEvent
 from app.pipeline.compose import ComposedSection
 from app.pipeline.summarise import EventSummary
 from app.result import OnSuccess
+from app.result import ServiceError
 from app.result import is_error
 from app.sources import fetch_all
-from app.sources import registry
 from app.sources import seeds
+from app.sources._common import ImplementsSourceAdapter
 
 logger = logging.get_logger(__name__)
 
 
+type Adapters = Mapping[str, ImplementsSourceAdapter]
+
+
+class RunError(ServiceError):
+    RANKING_FAILED = "ranking_failed"
+    ALL_SUMMARIES_FAILED = "all_summaries_failed"
+
+    @override
+    def service(self) -> str:
+        return "run"
+
+
 class RunOutcome(Model):
+    status: RunStatus
     digest_id: str | None
+    # Operator-facing detail: the skip reason or the error behind a failure.
     reason: str
-    failed: bool = False
     # The rendered digest of a dry run; the caller decides where it goes.
     preview_html: str | None = None
 
-
-class _Finished(Model):
-    """What the run row records; `status` is the operator-facing outcome word."""
-
-    status: str
-    outcome: RunOutcome
+    @property
+    def failed(self) -> bool:
+        return self.status in {RunStatus.FAILED, RunStatus.CRASHED}
 
 
-def _skipped(reason: str) -> _Finished:
-    return _Finished(
-        status="skipped", outcome=RunOutcome(digest_id=None, reason=reason)
-    )
+def _skipped(reason: str) -> RunOutcome:
+    return RunOutcome(status=RunStatus.SKIPPED, digest_id=None, reason=reason)
 
 
-async def _ingest(ctx: AbstractContext, run_id: str) -> tuple[SourceHealth, ...]:
+def _failed(error: ServiceError, digest_id: str | None = None) -> RunOutcome:
+    return RunOutcome(status=RunStatus.FAILED, digest_id=digest_id, reason=str(error))
+
+
+async def _ingest(
+    ctx: AbstractContext, run_id: str, adapters: Adapters
+) -> tuple[SourceHealth, ...]:
     await ctx.runs.set_stage(run_id, "seed")
     seeded = await seeds.seed_default_sources(ctx)
     await ctx.runs.set_stage(run_id, "fetch")
     sources = await ctx.sources.list_enabled()
-    fetched = await fetch_all.fetch_all(ctx, sources, adapters=registry.ADAPTERS)
+    fetched = await fetch_all.fetch_all(ctx, sources, adapters=adapters)
     new_ids = await ingest.store_new_items(ctx, fetched.items)
     logger.info(
         "Sources fetched.",
@@ -106,7 +123,7 @@ async def _rank_and_select(
     now: datetime,
     profile: Profile,
     interests: Interests,
-) -> list[DigestEventPlacement] | str:
+) -> OnSuccess[list[DigestEventPlacement]]:
     await ctx.runs.set_stage(run_id, "rank")
     since = now - timedelta(hours=settings.EVENT_WINDOW_HOURS)
     events = await ctx.events.list_updated_since(since)
@@ -120,7 +137,7 @@ async def _rank_and_select(
     if is_error(ranked):
         logger.error("Ranking failed.", extra={"error": str(ranked)})
 
-        return f"ranking failed: {ranked}"
+        return RunError.RANKING_FAILED
 
     await ctx.runs.set_stage(run_id, "select")
     pinned = await ctx.threads.list_pinned(since=threads.inactive_since(now))
@@ -227,15 +244,15 @@ async def _deliver(
     now: datetime,
     profile: Profile,
     dry_run: bool,
-) -> _Finished:
+) -> RunOutcome:
     if dry_run:
         logger.info("Dry run: digest built, not sent.", extra={"digest_id": digest.id})
 
-        return _Finished(
-            status="dry_run",
-            outcome=RunOutcome(
-                digest_id=None, reason="dry run", preview_html=digest.html
-            ),
+        return RunOutcome(
+            status=RunStatus.DRY_RUN,
+            digest_id=None,
+            reason="dry run",
+            preview_html=digest.html,
         )
 
     sent = await ctx.email.send(
@@ -251,20 +268,13 @@ async def _deliver(
             digest.id, DeliveryStatus.FAILED, str(sent)
         )
 
-        return _Finished(
-            status="failed",
-            outcome=RunOutcome(
-                digest_id=digest.id, reason=f"delivery failed: {sent}", failed=True
-            ),
-        )
+        return _failed(sent, digest.id)
 
     await ctx.digests.set_delivery_status(digest.id, DeliveryStatus.SENT, None)
     await ctx.preferences.set_last_digest_date(digest.date, now=now)
     logger.info("Digest sent.", extra={"digest_id": digest.id, "message_id": sent})
 
-    return _Finished(
-        status="sent", outcome=RunOutcome(digest_id=digest.id, reason="sent")
-    )
+    return RunOutcome(status=RunStatus.SENT, digest_id=digest.id, reason="sent")
 
 
 async def _stages(
@@ -276,18 +286,16 @@ async def _stages(
     profile: Profile,
     interests: Interests,
     dry_run: bool,
-) -> _Finished:
-    health = await _ingest(ctx, run_id)
+    adapters: Adapters,
+) -> RunOutcome:
+    health = await _ingest(ctx, run_id, adapters)
     await _group_events(ctx, run_id)
     placements = await _rank_and_select(
         ctx, run_id, now=now, profile=profile, interests=interests
     )
 
-    if isinstance(placements, str):
-        return _Finished(
-            status="failed",
-            outcome=RunOutcome(digest_id=None, reason=placements, failed=True),
-        )
+    if is_error(placements):
+        return _failed(placements)
 
     if len(placements) == 0:
         return _skipped("nothing new to send")
@@ -298,18 +306,13 @@ async def _stages(
     )
 
     if len(sections) == 0:
-        return _Finished(
-            status="failed",
-            outcome=RunOutcome(
-                digest_id=None, reason="every event summary failed", failed=True
-            ),
-        )
+        return _failed(RunError.ALL_SUMMARIES_FAILED)
 
     await ctx.runs.set_stage(run_id, "compose")
     # NOTE: Only summarised events are recorded, so an event whose summary failed is
     # not counted as sent and can appear tomorrow.
     digest = _build_digest(
-        digest_id=str(uuid.uuid4()),
+        digest_id=ctx.ids.new(),
         date=date,
         now=now,
         profile=profile,
@@ -330,7 +333,7 @@ async def _stages(
 
 async def _resend_failed(
     ctx: AbstractContext, *, date: str, now: datetime, profile: Profile
-) -> _Finished | None:
+) -> RunOutcome | None:
     """A digest built today whose delivery failed is sent again as it is, without
     spending another run of the model on it."""
     existing = await ctx.digests.find_by_date(date)
@@ -353,12 +356,12 @@ async def _decide(
     if not force and not decision.send:
         logger.info("Run skipped by schedule.", extra={"reason": decision.reason})
 
-        return RunOutcome(digest_id=None, reason=decision.reason)
+        return _skipped(decision.reason)
 
     if profile.email == "":
         logger.warning("Run refused: no delivery email configured.")
 
-        return RunOutcome(digest_id=None, reason="no delivery email configured")
+        return _skipped("no delivery email configured")
 
     day_start = schedule.start_of_local_day(profile.timezone, now)
     failures = await ctx.runs.count_failed_since(day_start)
@@ -369,7 +372,7 @@ async def _decide(
             extra={"failures": failures},
         )
 
-        return RunOutcome(digest_id=None, reason="delivery attempts used up today")
+        return _skipped("delivery attempts used up today")
 
     return decision
 
@@ -382,7 +385,8 @@ async def _attempt(
     decision: schedule.ScheduleDecision,
     profile: Profile,
     dry_run: bool,
-) -> _Finished:
+    adapters: Adapters,
+) -> RunOutcome:
     if not dry_run:
         resent = await _resend_failed(
             ctx, date=decision.local_date, now=now, profile=profile
@@ -399,11 +403,17 @@ async def _attempt(
         profile=profile,
         interests=await ctx.preferences.interests(),
         dry_run=dry_run,
+        adapters=adapters,
     )
 
 
 async def _run_holding_lease(
-    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
+    ctx: AbstractContext,
+    run_id: str,
+    *,
+    force: bool,
+    dry_run: bool,
+    adapters: Adapters,
 ) -> RunOutcome:
     now = ctx.clock.now()
     await ctx.runs.abandon_unfinished(except_id=run_id, now=now)
@@ -417,14 +427,20 @@ async def _run_holding_lease(
 
     try:
         finished = await _attempt(
-            ctx, run_id, now=now, decision=decision, profile=profile, dry_run=dry_run
+            ctx,
+            run_id,
+            now=now,
+            decision=decision,
+            profile=profile,
+            dry_run=dry_run,
+            adapters=adapters,
         )
     except asyncio.CancelledError:
         logger.warning("Pipeline run cancelled.")
         await ctx.runs.finish(
             run_id,
             now=ctx.clock.now(),
-            outcome="cancelled",
+            outcome=RunStatus.CANCELLED,
             detail=None,
             digest_id=None,
         )
@@ -435,7 +451,7 @@ async def _run_holding_lease(
         await ctx.runs.finish(
             run_id,
             now=ctx.clock.now(),
-            outcome="crashed",
+            outcome=RunStatus.CRASHED,
             detail=repr(error),
             digest_id=None,
         )
@@ -446,19 +462,24 @@ async def _run_holding_lease(
         run_id,
         now=ctx.clock.now(),
         outcome=finished.status,
-        detail=finished.outcome.reason,
-        digest_id=finished.outcome.digest_id,
+        detail=finished.reason,
+        digest_id=finished.digest_id,
     )
     logger.info(
         "Pipeline run finished.",
-        extra={"outcome": finished.status, "reason": finished.outcome.reason},
+        extra={"outcome": finished.status, "reason": finished.reason},
     )
 
-    return finished.outcome
+    return finished
 
 
 async def _run(
-    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
+    ctx: AbstractContext,
+    run_id: str,
+    *,
+    force: bool,
+    dry_run: bool,
+    adapters: Adapters,
 ) -> RunOutcome:
     """Every run holds the pipeline lease, so the scheduler, the API and a one-off
     command never build or send the same day's digest twice."""
@@ -471,29 +492,28 @@ async def _run(
     if not acquired:
         logger.warning("Run skipped: another run holds the lease.")
 
-        return RunOutcome(digest_id=None, reason="another run is in progress")
+        return _skipped("another run is in progress")
 
     try:
-        return await _run_holding_lease(ctx, run_id, force=force, dry_run=dry_run)
+        return await _run_holding_lease(
+            ctx, run_id, force=force, dry_run=dry_run, adapters=adapters
+        )
     finally:
         await ctx.runs.release_lease(run_id)
-
-
-def new_run_id() -> str:
-    return str(uuid.uuid4())
 
 
 async def run_pipeline(
     ctx: AbstractContext,
     *,
+    adapters: Adapters,
     force: bool,
     dry_run: bool,
     run_id: str | None = None,
 ) -> RunOutcome:
-    """Fetches, groups, ranks and sends one digest; `force` ignores the delivery
-    hour and `dry_run` returns the HTML instead of storing and emailing it."""
-    if run_id is None:
-        run_id = new_run_id()
+    """Fetches, groups, ranks and sends one digest; `force` ignores the schedule and
+    `dry_run` returns the HTML instead of storing and emailing it. `adapters` maps each
+    source kind to the adapter that fetches it."""
+    run_id = run_id or ctx.ids.new()
 
     with logging.scoped(run_id=run_id):
-        return await _run(ctx, run_id, force=force, dry_run=dry_run)
+        return await _run(ctx, run_id, force=force, dry_run=dry_run, adapters=adapters)

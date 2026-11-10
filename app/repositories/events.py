@@ -1,6 +1,9 @@
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from typing import override
 
 from app.adapters.database import ImplementsDatabase
 from app.adapters.database import Row
@@ -11,17 +14,41 @@ from app.repositories._common import StoreError
 from app.repositories._common import from_iso
 from app.repositories._common import placeholders
 from app.repositories._common import to_iso
-from app.repositories.items import ItemRepository
+from app.repositories.items import ImplementsItemRepository
 from app.result import OnSuccess
 
 
-class EventRepository:
+class ImplementsEventRepository(ABC):
+    @abstractmethod
+    async def create(self, event: Event) -> None: ...
+
+    @abstractmethod
+    async def update(self, event: Event) -> None: ...
+
+    @abstractmethod
+    async def scores(self, event_ids: Sequence[str]) -> dict[str, EventScore]: ...
+
+    @abstractmethod
+    async def save_scores(self, scores: Mapping[str, EventScore]) -> None: ...
+
+    @abstractmethod
+    async def find_by_id(self, event_id: str) -> OnSuccess[EventWithItems]: ...
+
+    @abstractmethod
+    async def list_updated_since(self, since: datetime) -> list[EventWithItems]: ...
+
+    @abstractmethod
+    async def list_by_thread(self, thread_id: str) -> list[EventWithItems]: ...
+
+
+class EventRepository(ImplementsEventRepository):
     __slots__ = ("_db", "_items")
 
-    def __init__(self, db: ImplementsDatabase, items: ItemRepository) -> None:
+    def __init__(self, db: ImplementsDatabase, items: ImplementsItemRepository) -> None:
         self._db = db
         self._items = items
 
+    @override
     async def create(self, event: Event) -> None:
         await self._db.execute(
             "INSERT INTO events (id, thread_id, title, summary, created_at, "
@@ -37,6 +64,7 @@ class EventRepository:
             ),
         )
 
+    @override
     async def update(self, event: Event) -> None:
         await self._db.execute(
             "UPDATE events SET thread_id = ?, title = ?, summary = ?, updated_at = ?, "
@@ -51,6 +79,7 @@ class EventRepository:
             ),
         )
 
+    @override
     async def scores(self, event_ids: Sequence[str]) -> dict[str, EventScore]:
         if len(event_ids) == 0:
             return {}
@@ -66,12 +95,14 @@ class EventRepository:
             for row in rows
         }
 
+    @override
     async def save_scores(self, scores: Mapping[str, EventScore]) -> None:
         await self._db.execute_many(
             "UPDATE events SET score_json = ? WHERE id = ?",
             [(score.model_dump_json(), event_id) for event_id, score in scores.items()],
         )
 
+    @override
     async def find_by_id(self, event_id: str) -> OnSuccess[EventWithItems]:
         row = await self._db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
 
@@ -80,6 +111,7 @@ class EventRepository:
 
         return await self._with_items(row)
 
+    @override
     async def list_updated_since(self, since: datetime) -> list[EventWithItems]:
         rows = await self._db.fetch_all(
             "SELECT * FROM events WHERE updated_at >= ? ORDER BY updated_at DESC",
@@ -88,18 +120,10 @@ class EventRepository:
 
         return [await self._with_items(row) for row in rows]
 
+    @override
     async def list_by_thread(self, thread_id: str) -> list[EventWithItems]:
         rows = await self._db.fetch_all(
             "SELECT * FROM events WHERE thread_id = ? ORDER BY created_at", (thread_id,)
-        )
-
-        return [await self._with_items(row) for row in rows]
-
-    async def list_unthreaded_since(self, since: datetime) -> list[EventWithItems]:
-        rows = await self._db.fetch_all(
-            "SELECT * FROM events WHERE thread_id IS NULL AND updated_at >= ? "
-            "ORDER BY updated_at",
-            (to_iso(since),),
         )
 
         return [await self._with_items(row) for row in rows]

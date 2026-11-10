@@ -1,6 +1,6 @@
 # AI Infra Daily — Requirements
 
-Status: draft v2, 2026-11-04. Supersedes the scope in `ARCHITECTURE.md` (single-user Cloudflare assignment).
+Status: v3, 2026-11-10. Requirements for the Python service in this repository; it replaces an earlier Cloudflare Workers prototype.
 
 ## Purpose
 
@@ -27,7 +27,7 @@ top-voted comments.
 - FR1.1 Ingest from mainstream outlets and vendor blogs via RSS/Atom (OpenAI, Anthropic, Google DeepMind, Meta AI, NVIDIA, Hugging Face, Cloudflare, arXiv cs.AI/cs.LG/cs.DC, The Verge AI, MIT Tech Review AI, etc.).
 - FR1.2 Ingest posts from **followed individual accounts** on social platforms: Xiaohongshu (RedNote), X/Twitter, Bluesky, WeChat Official Accounts (公众号), Zhihu, Bilibili, YouTube, Substack newsletters, personal blogs.
 - FR1.3 Ingest community discussion: Hacker News (stories + top comments), Reddit (r/MachineLearning, r/LocalLLaMA; top posts; the public feed carries no comments), Xiaohongshu top comments on followed posts.
-- FR1.4 Sources are configuration, not code: each source has a type (rss, json-api, bridge), an identifier, an enabled flag, a weight and a category (media, vendor, author, community). The owner can add, disable or reweight a source without a deploy.
+- FR1.4 Sources are configuration, not code: each source has a kind (rss, hn, reddit, bluesky, youtube, xiaohongshu, x), an identifier, an enabled flag, a weight between 0.2 and 2.0 and a category (media, vendor, author, community, paper). The owner can add, disable or reweight sources without a deploy (`aid sources`, `PATCH /api/sources/{id}`).
 - FR1.5 A failing source is skipped and reported in the digest footer; it never aborts the run.
 
 ### FR2 Normalisation and deduplication
@@ -62,7 +62,7 @@ top-voted comments.
 - FR6.1 For each selected event the LLM produces: a neutral summary, the key claims, and a short "different takes" section quoting individual posts and comments with attribution and links.
 - FR6.2 Digest style (brief, balanced, deep) controls the summary length and the number of events per category.
 - FR6.3 The email is grouped by category (FR5.6); a story that has run for more than one day carries a "Day N of this story" badge.
-- FR6.4 Chinese-language sources are summarised in the owner's preferred language (configurable; default English with original quotes kept in Chinese).
+- FR6.4 Each event is summarised in the language of its sources: English sources in English, Chinese sources in Chinese, any other language in English; quotes stay in their original language.
 
 ### FR7 Delivery and interaction
 
@@ -71,7 +71,7 @@ top-voted comments.
 - FR7.2a "More like this" and "less like this" also move the owner's weight for the event's topics.
 - FR7.2b The foot of each email carries at most two multiple-choice questions: which of the day's topics to see more of, and (alternating by day) whether the digest was too long or too short, or how technical the summaries should be. One tap answers; each question accepts one answer per digest.
 - FR7.2c The default layout is compact: each event is a title and a summary of one or two sentences, and taste is collected by the quiz alone, which keeps a digest of sixty events below the size at which mail clients clip a message. Key claims, quoted takes and the per-event feedback links belong to the full layout (`DIGEST_COMPACT = False`).
-- FR7.3 A chat interface lets the owner change preferences, ask "why was this included", and ask for the history of a thread. Preference changes are made through structured tool calls, not regex.
+- FR7.3 (Not implemented in this version.) A chat interface that lets the owner change preferences, ask "why was this included" and see a thread's history through structured tool calls. Today preferences change through the email questions, `aid prefs` and `PUT /api/preferences`, and the rationale of each placed event is stored with the digest.
 
 ## Quality attributes (measurable)
 
@@ -86,7 +86,7 @@ top-voted comments.
 
 - QR1 Content is for the owner's reading only; nothing is republished or shared, and fetch rates stay well under each platform's limits.
 - QR2 The system degrades gracefully: when social bridges are blocked, the digest still ships with RSS sources.
-- QR3 Code follows the project style guide (`docs/typescript.md`, derived from `skill.md`).
+- QR3 Code follows the project style guide (`skill.md`, kept outside the repository).
 
 ## Source feasibility (as of 2026-11)
 
@@ -102,6 +102,7 @@ top-voted comments.
 | WeChat Official Accounts             | RSSHub / wewe-rss (needs a Reading account cookie)                        | Medium         | Common community solution                                      |
 | Zhihu, Bilibili                      | RSSHub routes                                                             | Medium         | Some need cookies                                              |
 
-Decision: hard sources are not scraped inside the core system. A self-hosted
-**RSSHub bridge** turns them into RSS so the core only ever consumes feeds. If a
-bridge breaks, FR1.5 and QR2 apply.
+Decision: Xiaohongshu and X are read with a logged-in browser session (Playwright), isolated in
+their own adapters and switched off until a cookie is configured; a failure there never stops the
+digest (FR1.5, QR2). Because an automated session on a server risks the account, the planned
+direction is to read the Xiaohongshu feed on the owner's own computer and push the notes to the API.

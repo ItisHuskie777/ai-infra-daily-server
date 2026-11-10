@@ -55,6 +55,18 @@ class TechnicalDepth(StrEnum):
     DEEP = "deep"
 
 
+class RunStatus(StrEnum):
+    """How a pipeline run ended, as the `runs` table records it."""
+
+    SKIPPED = "skipped"
+    DRY_RUN = "dry_run"
+    SENT = "sent"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    CRASHED = "crashed"
+    ABANDONED = "abandoned"
+
+
 class DeliveryStatus(StrEnum):
     PENDING = "pending"
     SENT = "sent"
@@ -90,6 +102,11 @@ class QuizQuestion(StrEnum):
     FEWER_TOPICS = "fewer_topics"
     LENGTH = "length"
     DEPTH = "depth"
+
+
+# One range for every way a source weight can change: feedback, the API and the CLI.
+SOURCE_WEIGHT_MIN = 0.2
+SOURCE_WEIGHT_MAX = 2.0
 
 
 class Model(BaseModel):
@@ -163,7 +180,7 @@ class Source(Model):
     category: SourceCategory
     language: Language
     enabled: bool
-    weight: float = Field(gt=0, le=2)
+    weight: float = Field(ge=SOURCE_WEIGHT_MIN, le=SOURCE_WEIGHT_MAX)
     config: SourceConfig
 
     @property

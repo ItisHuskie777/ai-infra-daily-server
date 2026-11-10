@@ -9,6 +9,7 @@ from app.adapters import database
 from app.adapters import email
 from app.adapters import embeddings
 from app.adapters import http
+from app.adapters import ids
 from app.adapters import llm
 from app.adapters.browser import ImplementsBrowser
 from app.adapters.clock import ImplementsClock
@@ -16,9 +17,17 @@ from app.adapters.database import ImplementsDatabase
 from app.adapters.email import ImplementsEmail
 from app.adapters.embeddings import ImplementsEmbeddings
 from app.adapters.http import ImplementsHttp
+from app.adapters.ids import ImplementsIds
 from app.adapters.llm import ImplementsLlm
 from app.repositories import DigestRepository
 from app.repositories import EventRepository
+from app.repositories import ImplementsDigestRepository
+from app.repositories import ImplementsEventRepository
+from app.repositories import ImplementsItemRepository
+from app.repositories import ImplementsPreferenceRepository
+from app.repositories import ImplementsRunRepository
+from app.repositories import ImplementsSourceRepository
+from app.repositories import ImplementsThreadRepository
 from app.repositories import ItemRepository
 from app.repositories import PreferenceRepository
 from app.repositories import RunRepository
@@ -28,11 +37,22 @@ from app.repositories import ThreadRepository
 
 class AbstractContext(ABC):
     """Everything pipeline and source code may depend on. The entry point builds it from
-    real adapters; tests build it from fakes. Nothing below this reads settings."""
+    real adapters; tests build it from fakes."""
+
+    @property
+    @abstractmethod
+    def database(self) -> ImplementsDatabase: ...
+
+    @property
+    @abstractmethod
+    def ids(self) -> ImplementsIds: ...
 
     @property
     @abstractmethod
     def http(self) -> ImplementsHttp: ...
+
+    @abstractmethod
+    async def close(self) -> None: ...
 
     @property
     @abstractmethod
@@ -65,31 +85,31 @@ class AbstractContext(ABC):
 
     @property
     @abstractmethod
-    def sources(self) -> SourceRepository: ...
+    def sources(self) -> ImplementsSourceRepository: ...
 
     @property
     @abstractmethod
-    def items(self) -> ItemRepository: ...
+    def items(self) -> ImplementsItemRepository: ...
 
     @property
     @abstractmethod
-    def events(self) -> EventRepository: ...
+    def events(self) -> ImplementsEventRepository: ...
 
     @property
     @abstractmethod
-    def threads(self) -> ThreadRepository: ...
+    def threads(self) -> ImplementsThreadRepository: ...
 
     @property
     @abstractmethod
-    def digests(self) -> DigestRepository: ...
+    def digests(self) -> ImplementsDigestRepository: ...
 
     @property
     @abstractmethod
-    def preferences(self) -> PreferenceRepository: ...
+    def preferences(self) -> ImplementsPreferenceRepository: ...
 
     @property
     @abstractmethod
-    def runs(self) -> RunRepository: ...
+    def runs(self) -> ImplementsRunRepository: ...
 
 
 class Repositories:
@@ -104,13 +124,13 @@ class Repositories:
     )
 
     def __init__(self, db: ImplementsDatabase) -> None:
-        self.sources = SourceRepository(db)
-        self.items = ItemRepository(db)
-        self.events = EventRepository(db, self.items)
-        self.threads = ThreadRepository(db)
-        self.digests = DigestRepository(db)
-        self.preferences = PreferenceRepository(db)
-        self.runs = RunRepository(db)
+        self.sources: ImplementsSourceRepository = SourceRepository(db)
+        self.items: ImplementsItemRepository = ItemRepository(db)
+        self.events: ImplementsEventRepository = EventRepository(db, self.items)
+        self.threads: ImplementsThreadRepository = ThreadRepository(db)
+        self.digests: ImplementsDigestRepository = DigestRepository(db)
+        self.preferences: ImplementsPreferenceRepository = PreferenceRepository(db)
+        self.runs: ImplementsRunRepository = RunRepository(db)
 
 
 class Context(AbstractContext):
@@ -124,6 +144,7 @@ class Context(AbstractContext):
         email: ImplementsEmail,
         clock: ImplementsClock,
         database: ImplementsDatabase,
+        ids: ImplementsIds,
         xiaohongshu_cookie: str,
         x_cookie: str,
     ) -> None:
@@ -134,13 +155,20 @@ class Context(AbstractContext):
         self._email = email
         self._clock = clock
         self._database = database
+        self._ids = ids
         self._xiaohongshu_cookie = xiaohongshu_cookie
         self._x_cookie = x_cookie
         self._repositories = Repositories(database)
 
     @property
+    @override
     def database(self) -> ImplementsDatabase:
         return self._database
+
+    @property
+    @override
+    def ids(self) -> ImplementsIds:
+        return self._ids
 
     @property
     @override
@@ -184,39 +212,40 @@ class Context(AbstractContext):
 
     @property
     @override
-    def sources(self) -> SourceRepository:
+    def sources(self) -> ImplementsSourceRepository:
         return self._repositories.sources
 
     @property
     @override
-    def items(self) -> ItemRepository:
+    def items(self) -> ImplementsItemRepository:
         return self._repositories.items
 
     @property
     @override
-    def events(self) -> EventRepository:
+    def events(self) -> ImplementsEventRepository:
         return self._repositories.events
 
     @property
     @override
-    def threads(self) -> ThreadRepository:
+    def threads(self) -> ImplementsThreadRepository:
         return self._repositories.threads
 
     @property
     @override
-    def digests(self) -> DigestRepository:
+    def digests(self) -> ImplementsDigestRepository:
         return self._repositories.digests
 
     @property
     @override
-    def preferences(self) -> PreferenceRepository:
+    def preferences(self) -> ImplementsPreferenceRepository:
         return self._repositories.preferences
 
     @property
     @override
-    def runs(self) -> RunRepository:
+    def runs(self) -> ImplementsRunRepository:
         return self._repositories.runs
 
+    @override
     async def close(self) -> None:
         if self._browser is not None:
             await self._browser.close()
@@ -237,6 +266,7 @@ def default() -> Context:
         email=email.default(http_client),
         clock=clock.default(),
         database=database.default(),
+        ids=ids.default(),
         xiaohongshu_cookie=settings.XIAOHONGSHU_COOKIE,
         x_cookie=settings.X_COOKIE,
     )

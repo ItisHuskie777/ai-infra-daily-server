@@ -14,6 +14,8 @@ from app import logging
 from app import settings
 from app.api import auth
 from app.context import AbstractContext
+from app.models import SOURCE_WEIGHT_MAX
+from app.models import SOURCE_WEIGHT_MIN
 from app.models import DeliveryStatus
 from app.models import DigestStyle
 from app.models import FeedbackSignal
@@ -32,6 +34,7 @@ from app.repositories import StoreError
 from app.result import OnSuccess
 from app.result import ServiceError
 from app.result import is_error
+from app.sources import registry
 
 logger = logging.get_logger(__name__)
 
@@ -44,7 +47,9 @@ owner = APIRouter(prefix="/api", dependencies=[Depends(auth.require_owner)])
 
 class SourcePatch(Model):
     enabled: bool | None = None
-    weight: float | None = Field(default=None, gt=0, le=2)
+    weight: float | None = Field(
+        default=None, ge=SOURCE_WEIGHT_MIN, le=SOURCE_WEIGHT_MAX
+    )
 
 
 class ThreadPatch(Model):
@@ -448,9 +453,15 @@ async def start_run(
     if running is not None and not running.done():
         return _error("a run is already in progress", 409)
 
-    run_id = run.new_run_id()
+    run_id = ctx.ids.new()
     task = asyncio.create_task(
-        run.run_pipeline(ctx, force=body.force, dry_run=body.dry_run, run_id=run_id),
+        run.run_pipeline(
+            ctx,
+            adapters=registry.ADAPTERS,
+            force=body.force,
+            dry_run=body.dry_run,
+            run_id=run_id,
+        ),
         name=f"run-{run_id}",
     )
     task.add_done_callback(_log_run_result)

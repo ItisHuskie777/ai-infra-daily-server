@@ -1,5 +1,8 @@
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Sequence
 from datetime import datetime
+from typing import override
 
 import numpy
 from pydantic import TypeAdapter
@@ -32,16 +35,58 @@ class EmbeddedItem:
         self.vector = vector
 
 
-class ItemRepository:
+class ImplementsItemRepository(ABC):
+    @abstractmethod
+    async def insert_new(
+        self, items: Sequence[SourceItem], *, first_seen_at: datetime
+    ) -> list[str]:
+        """Inserts items whose id is not stored yet; returns the new ids (FR2.1)."""
+
+    @abstractmethod
+    async def find_by_ids(self, ids: Sequence[str]) -> list[StoredItem]: ...
+
+    @abstractmethod
+    async def list_unembedded(self, *, limit: int) -> list[StoredItem]: ...
+
+    @abstractmethod
+    async def store_embeddings(self, vectors: Sequence[tuple[str, Vector]]) -> None: ...
+
+    @abstractmethod
+    async def list_embedded_since(
+        self, published_after: datetime
+    ) -> list[EmbeddedItem]:
+        """Every embedded item in the window, clustered or not, with its vector."""
+
+    @abstractmethod
+    async def find_embedding(self, item_id: str) -> Vector | None: ...
+
+    @abstractmethod
+    async def list_by_event(self, event_id: str) -> list[StoredItem]: ...
+
+    @abstractmethod
+    async def assign_event(self, item_ids: Sequence[str], event_id: str) -> None: ...
+
+    @abstractmethod
+    async def filter_already_sent(self, ids: Sequence[str]) -> set[str]:
+        """Ids among `ids` that appeared in a digest that was sent (FR2.2)."""
+
+    @abstractmethod
+    async def prune_before(self, published_before: datetime) -> int:
+        """Drops the bulky parts (text, comments, vector) of items too old to matter;
+        the rows stay, so already-sent bookkeeping and references remain valid. An
+        empty vector, unlike NULL, keeps the item out of the embedding queue."""
+
+
+class ItemRepository(ImplementsItemRepository):
     __slots__ = ("_db",)
 
     def __init__(self, db: ImplementsDatabase) -> None:
         self._db = db
 
+    @override
     async def insert_new(
         self, items: Sequence[SourceItem], *, first_seen_at: datetime
     ) -> list[str]:
-        """Inserts items whose id is not stored yet; returns the new ids (FR2.1)."""
         if len(items) == 0:
             return []
 
@@ -91,6 +136,7 @@ class ItemRepository:
 
         return [item.id for item in new]
 
+    @override
     async def find_by_ids(self, ids: Sequence[str]) -> list[StoredItem]:
         if len(ids) == 0:
             return []
@@ -102,6 +148,7 @@ class ItemRepository:
 
         return [by_id[item_id] for item_id in ids if item_id in by_id]
 
+    @override
     async def list_unembedded(self, *, limit: int) -> list[StoredItem]:
         rows = await self._db.fetch_all(
             "SELECT * FROM items WHERE embedding IS NULL "
@@ -111,6 +158,7 @@ class ItemRepository:
 
         return [to_stored_item(row) for row in rows]
 
+    @override
     async def store_embeddings(self, vectors: Sequence[tuple[str, Vector]]) -> None:
         await self._db.execute_many(
             "UPDATE items SET embedding = ? WHERE id = ?",
@@ -120,10 +168,10 @@ class ItemRepository:
             ],
         )
 
+    @override
     async def list_embedded_since(
         self, published_after: datetime
     ) -> list[EmbeddedItem]:
-        """Every embedded item in the window, clustered or not, with its vector."""
         rows = await self._db.fetch_all(
             "SELECT * FROM items WHERE length(embedding) > 0 AND published_at >= ? "
             "ORDER BY published_at",
@@ -135,6 +183,7 @@ class ItemRepository:
             for row in rows
         ]
 
+    @override
     async def find_embedding(self, item_id: str) -> Vector | None:
         row = await self._db.fetch_one(
             "SELECT embedding FROM items WHERE id = ? AND length(embedding) > 0",
@@ -143,6 +192,7 @@ class ItemRepository:
 
         return None if row is None else _to_vector(row["embedding"])
 
+    @override
     async def list_by_event(self, event_id: str) -> list[StoredItem]:
         rows = await self._db.fetch_all(
             "SELECT * FROM items WHERE event_id = ? ORDER BY published_at", (event_id,)
@@ -150,6 +200,7 @@ class ItemRepository:
 
         return [to_stored_item(row) for row in rows]
 
+    @override
     async def assign_event(self, item_ids: Sequence[str], event_id: str) -> None:
         if len(item_ids) == 0:
             return
@@ -160,8 +211,8 @@ class ItemRepository:
             [event_id, *item_ids],
         )
 
+    @override
     async def filter_already_sent(self, ids: Sequence[str]) -> set[str]:
-        """Ids among `ids` that appeared in a digest that was sent (FR2.2)."""
         if len(ids) == 0:
             return set()
 
@@ -182,10 +233,8 @@ class ItemRepository:
 
         return sent
 
+    @override
     async def prune_before(self, published_before: datetime) -> int:
-        """Drops the bulky parts (text, comments, vector) of items too old to matter;
-        the rows stay, so already-sent bookkeeping and references remain valid. An
-        empty vector, unlike NULL, keeps the item out of the embedding queue."""
         return await self._db.execute(
             "UPDATE items SET text = '', comments_json = '[]', embedding = X'' "
             "WHERE published_at < ? AND (text != '' OR length(embedding) > 0)",

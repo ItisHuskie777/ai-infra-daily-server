@@ -6,6 +6,8 @@ from typing import override
 from app import logging
 from app import settings
 from app.context import AbstractContext
+from app.models import SOURCE_WEIGHT_MAX
+from app.models import SOURCE_WEIGHT_MIN
 from app.models import EventWithItems
 from app.models import Feedback
 from app.models import FeedbackSignal
@@ -20,10 +22,6 @@ from app.result import is_error
 
 logger = logging.get_logger(__name__)
 
-_WEIGHT_STEP_UP = 0.1
-_WEIGHT_STEP_DOWN = 0.15
-_WEIGHT_MAX = 2.0
-_WEIGHT_MIN = 0.2
 _MAX_KEYWORDS_PER_FEEDBACK = 3
 _MIN_KEYWORD_LENGTH = 4
 _TOKEN_SEPARATOR = re.compile(r"[\W_]+")
@@ -149,7 +147,7 @@ def pinned_query_for(title: str) -> str:
 
 
 def _clamp_weight(weight: float) -> float:
-    return min(_WEIGHT_MAX, max(_WEIGHT_MIN, round(weight, 3)))
+    return min(SOURCE_WEIGHT_MAX, max(SOURCE_WEIGHT_MIN, round(weight, 3)))
 
 
 def _without_keywords(
@@ -265,7 +263,11 @@ async def _apply_preference(
     if is_error(targets):
         return targets
 
-    delta = _WEIGHT_STEP_UP if direction == "more" else -_WEIGHT_STEP_DOWN
+    delta = (
+        settings.SOURCE_WEIGHT_STEP_UP
+        if direction == "more"
+        else -settings.SOURCE_WEIGHT_STEP_DOWN
+    )
     changes = await _adjust_weights(ctx, targets.source_ids, delta)
     step = (
         settings.TOPIC_WEIGHT_STEP

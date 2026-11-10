@@ -5,8 +5,9 @@ mainstream outlets and vendor blogs for the events, plus the individual voices
 (bloggers, Xiaohongshu and X accounts, Bluesky, YouTube, top Hacker News and Reddit
 comments) that interpret them. Items are deduplicated, clustered into events, linked
 into multi-day threads, ranked against the owner's interests, summarised in the
-language of the source (English or Chinese) and composed into one email. Feedback links
-in the email adjust tomorrow's ranking.
+language of the source (English or Chinese) and composed into one email, grouped by
+category. One or two questions at the foot of the email tune tomorrow's ranking; each
+link opens a confirmation page, and the answer applies when the owner confirms.
 
 The product requirements are in [`docs/requirements.md`](docs/requirements.md). This is
 the Python 3.14 rewrite of a Cloudflare Workers prototype; it runs on one Linux server.
@@ -22,7 +23,7 @@ the Python 3.14 rewrite of a Cloudflare Workers prototype; it runs on one Linux 
   +------------------------------------------------------------------+
   |  app.pipeline.run  ->  fetch_all -> ingest -> embed -> cluster   |
   |      -> threads -> rank -> select -> summarise -> compose -> send |
-  |  app.api.routes    ->  /feedback, /api/{sources,digests,...}     |
+  |  app.api.routes    ->  /quiz, /feedback, /api/{sources,...}      |
   +------------------------------------------------------------------+
                  |  AbstractContext (injected)
                  v
@@ -70,7 +71,8 @@ app/
   repositories/      one class per stored resource; all SQL lives here
   sources/           one adapter per source kind, fetch_all, seeds, registry
   pipeline/          ingest, embed, cluster, threads, rank, recommend, select,
-                     summarise, compose, quiz, feedback, feedback_token, schedule, run
+                     summarise, compose, quiz, links, feedback, feedback_token,
+                     schedule, run
   api/               FastAPI app, bearer auth, routes
   cli.py             the `aid` command
 migrations/          numbered SQL files applied by `aid migrate`
@@ -94,7 +96,8 @@ uv run aid sources list|enable|disable|weight
 uv run aid prefs show|set-email|set-hour|set-style|set-depth|add-topic|remove-topic|
            add-keyword [--exclude]|remove-keyword|follow|block|unblock
 uv run aid digests list
-uv run aid threads list
+uv run aid threads list|pin <id>|unpin <id>
+uv run aid maintain                  # prune old data, daily backup (the scheduler runs it)
 uv run aid serve                     # HTTP API on API_HOST:API_PORT
 ```
 

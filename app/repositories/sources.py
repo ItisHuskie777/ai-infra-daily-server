@@ -1,5 +1,8 @@
+from abc import ABC
+from abc import abstractmethod
 from collections.abc import Sequence
 from datetime import datetime
+from typing import override
 
 from pydantic import TypeAdapter
 
@@ -26,17 +29,54 @@ class SourceRun(Model):
     item_count: int
 
 
-class SourceRepository:
+class ImplementsSourceRepository(ABC):
+    @abstractmethod
+    async def list_all(self) -> list[Source]: ...
+
+    @abstractmethod
+    async def list_enabled(self) -> list[Source]: ...
+
+    @abstractmethod
+    async def find_by_id(self, source_id: str) -> OnSuccess[Source]: ...
+
+    @abstractmethod
+    async def upsert(self, source: Source, *, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def insert_missing(self, sources: Sequence[Source], *, now: datetime) -> int:
+        """Seeds sources that do not exist yet without touching the owner's edits."""
+
+    @abstractmethod
+    async def set_enabled(
+        self, source_id: str, *, enabled: bool, now: datetime
+    ) -> OnSuccess[None]: ...
+
+    @abstractmethod
+    async def set_weight(
+        self, source_id: str, *, weight: float, now: datetime
+    ) -> OnSuccess[None]: ...
+
+    @abstractmethod
+    async def record_run(self, run: SourceRun) -> None: ...
+
+    @abstractmethod
+    async def latest_health(self) -> list[SourceHealth]:
+        """The most recent run of every enabled source, for the digest footer."""
+
+
+class SourceRepository(ImplementsSourceRepository):
     __slots__ = ("_db",)
 
     def __init__(self, db: ImplementsDatabase) -> None:
         self._db = db
 
+    @override
     async def list_all(self) -> list[Source]:
         rows = await self._db.fetch_all("SELECT * FROM sources ORDER BY id")
 
         return [_to_source(row) for row in rows]
 
+    @override
     async def list_enabled(self) -> list[Source]:
         rows = await self._db.fetch_all(
             "SELECT * FROM sources WHERE enabled = 1 ORDER BY id"
@@ -44,6 +84,7 @@ class SourceRepository:
 
         return [_to_source(row) for row in rows]
 
+    @override
     async def find_by_id(self, source_id: str) -> OnSuccess[Source]:
         row = await self._db.fetch_one(
             "SELECT * FROM sources WHERE id = ?", (source_id,)
@@ -54,6 +95,7 @@ class SourceRepository:
 
         return _to_source(row)
 
+    @override
     async def upsert(self, source: Source, *, now: datetime) -> None:
         await self._db.execute(
             "INSERT INTO sources (id, name, kind, category, language, enabled, weight, "
@@ -76,8 +118,8 @@ class SourceRepository:
             ),
         )
 
+    @override
     async def insert_missing(self, sources: Sequence[Source], *, now: datetime) -> int:
-        """Seeds sources that do not exist yet without touching the owner's edits."""
         existing = {
             str(row["id"]) for row in await self._db.fetch_all("SELECT id FROM sources")
         }
@@ -107,6 +149,7 @@ class SourceRepository:
 
         return len(new)
 
+    @override
     async def set_enabled(
         self, source_id: str, *, enabled: bool, now: datetime
     ) -> OnSuccess[None]:
@@ -122,6 +165,7 @@ class SourceRepository:
 
         return None
 
+    @override
     async def set_weight(
         self, source_id: str, *, weight: float, now: datetime
     ) -> OnSuccess[None]:
@@ -137,6 +181,7 @@ class SourceRepository:
 
         return None
 
+    @override
     async def record_run(self, run: SourceRun) -> None:
         await self._db.execute(
             "INSERT INTO source_runs (source_id, started_at, finished_at, ok, error, "
@@ -152,8 +197,8 @@ class SourceRepository:
             ),
         )
 
+    @override
     async def latest_health(self) -> list[SourceHealth]:
-        """The most recent run of every enabled source, for the digest footer."""
         rows = await self._db.fetch_all(
             "SELECT s.id AS source_id, s.name, r.ok, r.error, r.item_count "
             "FROM sources s JOIN source_runs r ON r.source_id = s.id "

@@ -1,4 +1,7 @@
+from abc import ABC
+from abc import abstractmethod
 from datetime import datetime
+from typing import override
 
 from app import settings
 from app.adapters.database import ImplementsDatabase
@@ -11,14 +14,33 @@ _PROFILE_KEY = "profile"
 _INTERESTS_KEY = "interests"
 
 
-class PreferenceRepository:
+class ImplementsPreferenceRepository(ABC):
+    @abstractmethod
+    async def profile(self) -> Profile:
+        """The stored profile, or the one implied by the environment before any edit."""
+
+    @abstractmethod
+    async def save_profile(self, profile: Profile, *, now: datetime) -> None: ...
+
+    @abstractmethod
+    async def set_last_digest_date(self, date: str, *, now: datetime) -> None:
+        """Changes one field in place, so a profile edited during a run is kept."""
+
+    @abstractmethod
+    async def interests(self) -> Interests: ...
+
+    @abstractmethod
+    async def save_interests(self, interests: Interests, *, now: datetime) -> None: ...
+
+
+class PreferenceRepository(ImplementsPreferenceRepository):
     __slots__ = ("_db",)
 
     def __init__(self, db: ImplementsDatabase) -> None:
         self._db = db
 
+    @override
     async def profile(self) -> Profile:
-        """The stored profile, or the one implied by the environment before any edit."""
         row = await self._db.fetch_one(
             "SELECT value_json FROM preferences WHERE key = ?", (_PROFILE_KEY,)
         )
@@ -34,17 +56,19 @@ class PreferenceRepository:
 
         return Profile.model_validate_json(str(row["value_json"]))
 
+    @override
     async def save_profile(self, profile: Profile, *, now: datetime) -> None:
         await self._save(_PROFILE_KEY, profile.model_dump_json(), now)
 
+    @override
     async def set_last_digest_date(self, date: str, *, now: datetime) -> None:
-        """Changes one field in place, so a profile edited during a run is kept."""
         await self._db.execute(
             "UPDATE preferences SET value_json = json_set(value_json, "
             "'$.last_digest_date', ?), updated_at = ? WHERE key = ?",
             (date, to_iso(now), _PROFILE_KEY),
         )
 
+    @override
     async def interests(self) -> Interests:
         row = await self._db.fetch_one(
             "SELECT value_json FROM preferences WHERE key = ?", (_INTERESTS_KEY,)
@@ -55,6 +79,7 @@ class PreferenceRepository:
 
         return Interests.model_validate_json(str(row["value_json"]))
 
+    @override
     async def save_interests(self, interests: Interests, *, now: datetime) -> None:
         await self._save(_INTERESTS_KEY, interests.model_dump_json(), now)
 
