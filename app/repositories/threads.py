@@ -31,18 +31,23 @@ class ThreadRepository:
         )
 
     async def update(self, thread: Thread) -> None:
+        """Pipeline progress only; pinning is the owner's and changes through
+        `set_pinned`, so a run holding an older copy cannot undo it."""
         await self._db.execute(
-            "UPDATE threads SET title = ?, last_seen_at = ?, day_count = ?, "
-            "pinned = ?, pinned_query = ? WHERE id = ?",
-            (
-                thread.title,
-                to_iso(thread.last_seen_at),
-                thread.day_count,
-                int(thread.pinned),
-                thread.pinned_query,
-                thread.id,
-            ),
+            "UPDATE threads SET title = ?, last_seen_at = ?, day_count = ? "
+            "WHERE id = ?",
+            (thread.title, to_iso(thread.last_seen_at), thread.day_count, thread.id),
         )
+
+    async def set_pinned(
+        self, thread_id: str, *, pinned: bool, query: str | None
+    ) -> OnSuccess[None]:
+        changed = await self._db.execute(
+            "UPDATE threads SET pinned = ?, pinned_query = ? WHERE id = ?",
+            (int(pinned), query if pinned else None, thread_id),
+        )
+
+        return StoreError.NOT_FOUND if changed == 0 else None
 
     async def find_by_id(self, thread_id: str) -> OnSuccess[Thread]:
         row = await self._db.fetch_one(
@@ -56,16 +61,18 @@ class ThreadRepository:
 
     async def list_active(self, *, since: datetime) -> list[Thread]:
         rows = await self._db.fetch_all(
-            "SELECT * FROM threads WHERE last_seen_at >= ? OR pinned = 1 "
-            "ORDER BY last_seen_at DESC",
+            "SELECT * FROM threads WHERE last_seen_at >= ? ORDER BY last_seen_at DESC",
             (to_iso(since),),
         )
 
         return [_to_thread(row) for row in rows]
 
-    async def list_pinned(self) -> list[Thread]:
+    async def list_pinned(self, *, since: datetime) -> list[Thread]:
+        """Pinned threads seen since `since`; a pin lapses with inactivity (FR4.2)."""
         rows = await self._db.fetch_all(
-            "SELECT * FROM threads WHERE pinned = 1 ORDER BY last_seen_at DESC"
+            "SELECT * FROM threads WHERE pinned = 1 AND last_seen_at >= ? "
+            "ORDER BY last_seen_at DESC",
+            (to_iso(since),),
         )
 
         return [_to_thread(row) for row in rows]

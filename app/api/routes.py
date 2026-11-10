@@ -1,5 +1,4 @@
 import asyncio
-from datetime import timedelta
 from html import escape
 from typing import Annotated
 
@@ -23,8 +22,11 @@ from app.models import Model
 from app.models import Profile
 from app.models import Source
 from app.models import Thread
+from app.pipeline import feedback
 from app.pipeline import links
 from app.pipeline import run
+from app.pipeline import schedule
+from app.pipeline import threads
 from app.pipeline.links import LinkError
 from app.repositories import StoreError
 from app.result import OnSuccess
@@ -43,6 +45,14 @@ owner = APIRouter(prefix="/api", dependencies=[Depends(auth.require_owner)])
 class SourcePatch(Model):
     enabled: bool | None = None
     weight: float | None = Field(default=None, gt=0, le=2)
+
+
+class ThreadPatch(Model):
+    pinned: bool
+
+
+class ThreadResponse(Model):
+    thread: Thread
 
 
 class RunRequest(Model):
@@ -364,12 +374,35 @@ async def preview_digest(digest_id: str, ctx: Ctx) -> HTMLResponse | JSONRespons
 
 @owner.get("/threads")
 async def list_threads(ctx: Ctx, pinned: bool = False) -> ThreadsResponse:
-    if pinned:
-        return ThreadsResponse(threads=tuple(await ctx.threads.list_pinned()))
+    since = threads.inactive_since(ctx.clock.now())
 
-    since = ctx.clock.now() - timedelta(days=settings.THREAD_INACTIVE_DAYS)
+    if pinned:
+        return ThreadsResponse(
+            threads=tuple(await ctx.threads.list_pinned(since=since))
+        )
 
     return ThreadsResponse(threads=tuple(await ctx.threads.list_active(since=since)))
+
+
+@owner.patch("/threads/{thread_id}", response_model=ThreadResponse)
+async def patch_thread(
+    thread_id: str, patch: ThreadPatch, ctx: Ctx
+) -> ThreadResponse | JSONResponse:
+    found = await ctx.threads.find_by_id(thread_id)
+
+    if is_error(found):
+        return _error(found, _store_status(found))
+
+    query = feedback.pinned_query_for(found.title) if patch.pinned else None
+    await ctx.threads.set_pinned(thread_id, pinned=patch.pinned, query=query)
+    updated = await ctx.threads.find_by_id(thread_id)
+
+    if is_error(updated):
+        return _error(updated, _store_status(updated))
+
+    logger.info("Thread pin changed.", extra={"thread_id": thread_id})
+
+    return ThreadResponse(thread=updated)
 
 
 @owner.get("/preferences")
@@ -386,6 +419,11 @@ async def put_preferences(
 ) -> PreferencesResponse | JSONResponse:
     if payload.profile is None and payload.interests is None:
         return _error("profile or interests is required", 400)
+
+    if payload.profile is not None and not schedule.is_known_timezone(
+        payload.profile.timezone
+    ):
+        return _error("unknown timezone", 400)
 
     now = ctx.clock.now()
 

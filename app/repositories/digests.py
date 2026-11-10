@@ -39,40 +39,55 @@ class DigestRepository:
         self._db = db
 
     async def save(self, digest: Digest) -> None:
-        """Stores the digest and its placements; ranked events are not persisted."""
-        await self._db.execute(
-            "INSERT INTO digests (id, date, style, subject, html, health_json, "
-            "delivery_status, delivery_error, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                digest.id,
-                digest.date,
-                digest.style,
-                digest.subject,
-                digest.html,
-                _HEALTH.dump_json(digest.health).decode(),
-                digest.delivery_status,
-                digest.delivery_error,
-                to_iso(digest.created_at),
-            ),
-        )
-        await self._db.execute_many(
-            "INSERT INTO digest_events (digest_id, event_id, section, position, "
-            "relevance_score, rationale, item_ids_json, topics_json) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+        """Stores the digest and its placements together; ranked events are not
+        persisted."""
+        await self._db.transaction(
             [
                 (
-                    digest.id,
-                    placement.event.id,
-                    placement.section,
-                    placement.position,
-                    placement.event.relevance_score,
-                    placement.event.rationale,
-                    to_json(list(placement.item_ids)),
-                    to_json([topic.value for topic in placement.event.topics]),
-                )
-                for placement in digest.placements
-            ],
+                    "INSERT INTO digests (id, date, style, subject, html, health_json, "
+                    "delivery_status, delivery_error, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        digest.id,
+                        digest.date,
+                        digest.style,
+                        digest.subject,
+                        digest.html,
+                        _HEALTH.dump_json(digest.health).decode(),
+                        digest.delivery_status,
+                        digest.delivery_error,
+                        to_iso(digest.created_at),
+                    ),
+                ),
+                *(
+                    (
+                        "INSERT INTO digest_events (digest_id, event_id, section, "
+                        "position, relevance_score, rationale, item_ids_json, "
+                        "topics_json) VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            digest.id,
+                            placement.event.id,
+                            placement.section,
+                            placement.position,
+                            placement.event.relevance_score,
+                            placement.event.rationale,
+                            to_json(list(placement.item_ids)),
+                            to_json([topic.value for topic in placement.event.topics]),
+                        ),
+                    )
+                    for placement in digest.placements
+                ),
+            ]
         )
+
+    async def latest_sent_date(self) -> str | None:
+        """The local date of the last digest that went out; this, not the profile,
+        decides whether today's digest is still due."""
+        row = await self._db.fetch_one(
+            "SELECT MAX(date) AS date FROM digests WHERE delivery_status = 'sent'"
+        )
+
+        return None if row is None or row["date"] is None else str(row["date"])
 
     async def set_delivery_status(
         self, digest_id: str, status: DeliveryStatus, error: str | None

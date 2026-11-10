@@ -3,6 +3,7 @@ from datetime import datetime
 from datetime import tzinfo
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
+from zoneinfo import available_timezones
 
 from app import logging
 from app.models import Model
@@ -32,14 +33,16 @@ def zone_for(timezone: str) -> tzinfo:
         return UTC
 
 
-def should_send_now(profile: Profile, now: datetime) -> ScheduleDecision:
+def should_send_now(
+    profile: Profile, now: datetime, *, last_sent_date: str | None
+) -> ScheduleDecision:
     """Called hourly: the digest is due from the owner's delivery hour until it has
     gone out that local day, so a failed or missed run is retried the next hour and a
     delivery hour skipped by a daylight-saving change is caught up."""
     local = now.astimezone(zone_for(profile.timezone))
     local_date = local.strftime("%Y-%m-%d")
 
-    if profile.last_digest_date == local_date:
+    if last_sent_date == local_date:
         return ScheduleDecision(
             send=False, local_date=local_date, reason=_REASON_ALREADY_SENT
         )
@@ -50,6 +53,10 @@ def should_send_now(profile: Profile, now: datetime) -> ScheduleDecision:
         )
 
     return ScheduleDecision(send=True, local_date=local_date, reason=_REASON_DUE)
+
+
+def is_known_timezone(timezone: str) -> bool:
+    return timezone in available_timezones()
 
 
 def start_of_local_day(timezone: str, now: datetime) -> datetime:

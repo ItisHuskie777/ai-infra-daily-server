@@ -16,6 +16,7 @@ from app.models import Interests
 from app.models import TechnicalDepth
 from app.pipeline import cluster
 from app.pipeline import embed
+from app.pipeline import feedback
 from app.pipeline import ingest
 from app.pipeline import run
 from app.pipeline import threads
@@ -28,12 +29,18 @@ type Command = Callable[[Context, argparse.Namespace], Awaitable[int]]
 
 logger = logging.get_logger(__name__)
 
-_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 _DIGEST_LIST_LIMIT = 20
+_PREVIEW_DIRECTORY = Path("data")
 
 
 async def _migrate(ctx: Context, args: argparse.Namespace) -> int:
-    applied = await ctx.database.migrate(_MIGRATIONS)
+    applied = await ctx.database.migrate(settings.MIGRATIONS_DIRECTORY)
+
+    if is_error(applied):
+        print(f"migration failed: {applied}")
+
+        return 1
+
     print(f"applied {len(applied)} migration(s)")
 
     for name in applied:
@@ -49,8 +56,27 @@ async def _seed(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _write_preview(html: str, date: str) -> Path:
+    path = _PREVIEW_DIRECTORY / f"digest-{date}.html"
+
+    def write() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html, encoding="utf-8")
+
+    await asyncio.to_thread(write)
+
+    return path
+
+
 async def _run(ctx: Context, args: argparse.Namespace) -> int:
     outcome = await run.run_pipeline(ctx, force=args.force, dry_run=args.dry_run)
+
+    if outcome.preview_html is not None:
+        path = await _write_preview(outcome.preview_html, f"{ctx.clock.now():%Y-%m-%d}")
+        print(f"dry run: preview written to {path}")
+
+        return 0
+
     print(f"{outcome.reason} (digest {outcome.digest_id or '-'})")
 
     return 1 if outcome.failed else 0
@@ -78,8 +104,9 @@ async def _stage(ctx: Context, args: argparse.Namespace) -> int:
                 f"updated {len(outcome.updated)}"
             )
         case "threads":
+            # NOTE: The same events a run links: every event updated in the window.
             since = ctx.clock.now() - timedelta(hours=settings.EVENT_WINDOW_HOURS)
-            events = await ctx.events.list_unthreaded_since(since)
+            events = await ctx.events.list_updated_since(since)
             ids = [event.id for event in events]
             print(f"linked {await threads.link_events_to_threads(ctx, ids)} event(s)")
         case _:
@@ -184,8 +211,13 @@ async def _prefs(ctx: Context, args: argparse.Namespace) -> int:
         case _:
             interests = _edit_interests(interests, args)
 
-    await ctx.preferences.save_profile(profile, now=now)
-    await ctx.preferences.save_interests(interests, now=now)
+    # NOTE: Only what changed is written, so a feedback click at the same moment
+    # survives.
+    if profile != await ctx.preferences.profile():
+        await ctx.preferences.save_profile(profile, now=now)
+
+    if interests != await ctx.preferences.interests():
+        await ctx.preferences.save_interests(interests, now=now)
 
     if args.action != "show":
         print(f"preferences updated ({args.action})")
@@ -200,8 +232,26 @@ async def _digests(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _set_pinned(ctx: Context, thread_id: str, *, pinned: bool) -> int:
+    found = await ctx.threads.find_by_id(thread_id)
+
+    if is_error(found):
+        print(f"no thread {thread_id}")
+
+        return 1
+
+    query = feedback.pinned_query_for(found.title) if pinned else None
+    await ctx.threads.set_pinned(thread_id, pinned=pinned, query=query)
+    print(f"thread {thread_id} {'pinned' if pinned else 'unpinned'}")
+
+    return 0
+
+
 async def _threads(ctx: Context, args: argparse.Namespace) -> int:
-    since = ctx.clock.now() - timedelta(days=settings.THREAD_INACTIVE_DAYS)
+    if args.action in {"pin", "unpin"}:
+        return await _set_pinned(ctx, args.id, pinned=args.action == "pin")
+
+    since = threads.inactive_since(ctx.clock.now())
 
     for thread in await ctx.threads.list_active(since=since):
         pin = "pinned" if thread.pinned else "      "
@@ -211,6 +261,34 @@ async def _threads(ctx: Context, args: argparse.Namespace) -> int:
         )
 
     return 0
+
+
+async def _maintain(ctx: Context, args: argparse.Namespace) -> int:
+    """Daily housekeeping, safe to run every hour: prunes, then backs up once a day."""
+    now = ctx.clock.now()
+    retention = timedelta(days=settings.RETENTION_DAYS)
+    pruned_items = await ctx.items.prune_before(now - retention)
+    pruned_runs = await ctx.runs.prune_before(now - 2 * retention)
+    backup = settings.BACKUP_DIRECTORY / f"aid-{now:%Y-%m-%d}.sqlite3"
+
+    if not await asyncio.to_thread(backup.exists):
+        await ctx.database.backup(backup)
+        removed = await asyncio.to_thread(_remove_old_backups)
+        print(f"backed up to {backup}; removed {removed} old backup(s)")
+
+    print(f"pruned {pruned_items} item(s) and {pruned_runs} run record(s)")
+
+    return 0
+
+
+def _remove_old_backups() -> int:
+    backups = sorted(settings.BACKUP_DIRECTORY.glob("aid-*.sqlite3"))
+    old = backups[: max(0, len(backups) - settings.BACKUPS_KEPT)]
+
+    for path in old:
+        path.unlink()
+
+    return len(old)
 
 
 async def _execute(command: Command, args: argparse.Namespace) -> int:
@@ -271,8 +349,14 @@ def _build_parser() -> argparse.ArgumentParser:
     keyword.add_argument("--exclude", action="store_true")
     digests = commands.add_parser("digests", help="list recent digests")
     digests.add_subparsers(dest="action", required=True).add_parser("list")
-    threads_parser = commands.add_parser("threads", help="list active threads")
-    threads_parser.add_subparsers(dest="action", required=True).add_parser("list")
+    threads_parser = commands.add_parser("threads", help="list or pin threads")
+    thread_actions = threads_parser.add_subparsers(dest="action", required=True)
+    thread_actions.add_parser("list")
+
+    for action in ("pin", "unpin"):
+        thread_actions.add_parser(action).add_argument("id")
+
+    commands.add_parser("maintain", help="prune old data and back up the database")
     commands.add_parser("serve", help="serve the HTTP API")
 
     return parser
@@ -287,6 +371,7 @@ _COMMANDS: dict[str, Command] = {
     "prefs": _prefs,
     "digests": _digests,
     "threads": _threads,
+    "maintain": _maintain,
 }
 
 

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 DATABASE_PATH = os.environ["DATABASE_PATH"]
 
@@ -26,6 +27,12 @@ XIAOHONGSHU_COOKIE = os.environ.get("XIAOHONGSHU_COOKIE", "")
 X_COOKIE = os.environ.get("X_COOKIE", "")
 
 LOG_LEVEL = os.environ["LOG_LEVEL"]
+
+MIGRATIONS_DIRECTORY = Path(__file__).resolve().parent.parent / "migrations"
+BACKUP_DIRECTORY = Path(DATABASE_PATH).parent / "backups"
+BACKUPS_KEPT = 7
+# Items older than this lose their text and vector; run history is kept twice as long.
+RETENTION_DAYS = 30
 
 MAX_ITEMS_PER_SOURCE = 40
 SOURCE_FETCH_CONCURRENCY = 8

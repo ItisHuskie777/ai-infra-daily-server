@@ -2,7 +2,7 @@ import re
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
-from zoneinfo import ZoneInfo
+from datetime import tzinfo
 
 from app import logging
 from app import settings
@@ -11,11 +11,13 @@ from app.adapters.embeddings import cosine_similarity
 from app.context import AbstractContext
 from app.models import Event
 from app.models import Thread
+from app.pipeline import schedule
 from app.pipeline.embed import build_embedding_text
 from app.result import is_error
 
 logger = logging.get_logger(__name__)
 
+_PINNED_MATCHES_NEEDED = 2
 _QUERY_SEPARATOR = re.compile(r"[\s,]+")
 
 
@@ -30,7 +32,7 @@ class _Candidate:
 class _LinkState:
     __slots__ = ("candidates", "continuations", "linked", "threads", "zone")
 
-    def __init__(self, zone: ZoneInfo) -> None:
+    def __init__(self, zone: tzinfo) -> None:
         self.zone = zone
         self.threads: dict[str, Thread] = {}
         self.candidates: list[_Candidate] = []
@@ -43,13 +45,16 @@ def thread_id_for(event_id: str) -> str:
 
 
 def matches_pinned_query(query: str, text: str) -> bool:
+    """A pinned query is a few keywords; an event matches when at least two of them
+    (or the only one) appear in its text."""
     haystack = text.lower()
     keywords = [word for word in _QUERY_SEPARATOR.split(query.lower()) if word != ""]
+    needed = min(_PINNED_MATCHES_NEEDED, len(keywords))
 
-    return len(keywords) > 0 and all(keyword in haystack for keyword in keywords)
+    return needed > 0 and sum(keyword in haystack for keyword in keywords) >= needed
 
 
-def touch_thread(thread: Thread, event: Event, *, zone: ZoneInfo) -> Thread:
+def touch_thread(thread: Thread, event: Event, *, zone: tzinfo) -> Thread:
     """Moves the thread's last activity to the event's time; a changed local date counts
     as a new day of the story (FR4.1)."""
     is_new_day = _local_date(event.updated_at, zone) != _local_date(
@@ -64,7 +69,7 @@ def touch_thread(thread: Thread, event: Event, *, zone: ZoneInfo) -> Thread:
     )
 
 
-def _local_date(moment: datetime, zone: ZoneInfo) -> str:
+def _local_date(moment: datetime, zone: tzinfo) -> str:
     return moment.astimezone(zone).date().isoformat()
 
 
@@ -132,7 +137,7 @@ async def _match_pinned(
 ) -> list[Event]:
     """Assigns events to pinned threads whose query keywords all appear in the event
     text (FR4.2); returns the events left over."""
-    pinned = await ctx.threads.list_pinned()
+    pinned = await ctx.threads.list_pinned(since=inactive_since(ctx.clock.now()))
 
     for thread in pinned:
         state.threads[thread.id] = thread
@@ -288,7 +293,7 @@ async def link_events_to_threads(ctx: AbstractContext, event_ids: Sequence[str])
     one (FR4.1). Returns the number of events linked."""
     events = await _load_events(ctx, event_ids)
     profile = await ctx.preferences.profile()
-    state = _LinkState(ZoneInfo(profile.timezone))
+    state = _LinkState(schedule.zone_for(profile.timezone))
     unpinned = await _match_pinned(ctx, state, events)
     unlinked: list[Event] = []
 

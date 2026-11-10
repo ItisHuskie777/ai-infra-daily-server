@@ -21,6 +21,9 @@ _COMMENTS = TypeAdapter(tuple[Comment, ...])
 _ENGAGEMENT = TypeAdapter(Engagement)
 
 
+_QUERY_CHUNK = 500
+
+
 class EmbeddedItem:
     __slots__ = ("item", "vector")  # Thousands exist per clustering pass.
 
@@ -122,7 +125,7 @@ class ItemRepository:
     ) -> list[EmbeddedItem]:
         """Every embedded item in the window, clustered or not, with its vector."""
         rows = await self._db.fetch_all(
-            "SELECT * FROM items WHERE embedding IS NOT NULL AND published_at >= ? "
+            "SELECT * FROM items WHERE length(embedding) > 0 AND published_at >= ? "
             "ORDER BY published_at",
             (to_iso(published_after),),
         )
@@ -134,7 +137,7 @@ class ItemRepository:
 
     async def find_embedding(self, item_id: str) -> Vector | None:
         row = await self._db.fetch_one(
-            "SELECT embedding FROM items WHERE id = ? AND embedding IS NOT NULL",
+            "SELECT embedding FROM items WHERE id = ? AND length(embedding) > 0",
             (item_id,),
         )
 
@@ -162,19 +165,32 @@ class ItemRepository:
         if len(ids) == 0:
             return set()
 
-        rows = await self._db.fetch_all(
-            "SELECT de.item_ids_json FROM digest_events de "
-            "JOIN digests d ON d.id = de.digest_id WHERE d.delivery_status = 'sent'"
-        )
         sent: set[str] = set()
+        unique = list(dict.fromkeys(ids))
 
-        for row in rows:
-            listed = from_json(row["item_ids_json"])
+        for start in range(0, len(unique), _QUERY_CHUNK):
+            chunk = unique[start : start + _QUERY_CHUNK]
+            rows = await self._db.fetch_all(
+                "SELECT DISTINCT listed.value AS item_id FROM digest_events de "
+                "JOIN digests d ON d.id = de.digest_id, "
+                "json_each(de.item_ids_json) AS listed "
+                "WHERE d.delivery_status = 'sent' "
+                f"AND listed.value IN ({placeholders(len(chunk))})",
+                tuple(chunk),
+            )
+            sent.update(str(row["item_id"]) for row in rows)
 
-            if isinstance(listed, list):
-                sent.update(str(value) for value in listed)
+        return sent
 
-        return {item_id for item_id in ids if item_id in sent}
+    async def prune_before(self, published_before: datetime) -> int:
+        """Drops the bulky parts (text, comments, vector) of items too old to matter;
+        the rows stay, so already-sent bookkeeping and references remain valid. An
+        empty vector, unlike NULL, keeps the item out of the embedding queue."""
+        return await self._db.execute(
+            "UPDATE items SET text = '', comments_json = '[]', embedding = X'' "
+            "WHERE published_at < ? AND (text != '' OR length(embedding) > 0)",
+            (to_iso(published_before),),
+        )
 
 
 def to_stored_item(row: Row) -> StoredItem:

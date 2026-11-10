@@ -37,6 +37,14 @@ class PreferenceRepository:
     async def save_profile(self, profile: Profile, *, now: datetime) -> None:
         await self._save(_PROFILE_KEY, profile.model_dump_json(), now)
 
+    async def set_last_digest_date(self, date: str, *, now: datetime) -> None:
+        """Changes one field in place, so a profile edited during a run is kept."""
+        await self._db.execute(
+            "UPDATE preferences SET value_json = json_set(value_json, "
+            "'$.last_digest_date', ?), updated_at = ? WHERE key = ?",
+            (date, to_iso(now), _PROFILE_KEY),
+        )
+
     async def interests(self) -> Interests:
         row = await self._db.fetch_one(
             "SELECT value_json FROM preferences WHERE key = ?", (_INTERESTS_KEY,)

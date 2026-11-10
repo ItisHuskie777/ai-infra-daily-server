@@ -143,6 +143,11 @@ def extract_keywords(title: str, existing: Sequence[str]) -> list[str]:
     return keywords
 
 
+def pinned_query_for(title: str) -> str:
+    """The few distinctive words of a thread's title; later events match on them."""
+    return " ".join(extract_keywords(title, ()))
+
+
 def _clamp_weight(weight: float) -> float:
     return min(_WEIGHT_MAX, max(_WEIGHT_MIN, round(weight, 3)))
 
@@ -333,9 +338,14 @@ async def _pin_thread(
     if is_error(thread):
         return thread
 
-    pinned = thread.model_copy(update={"pinned": True, "pinned_query": thread.title})
-    await ctx.threads.update(pinned)
-    logger.info("Thread pinned.", extra={"thread_id": pinned.id})
+    pinned = await ctx.threads.set_pinned(
+        thread.id, pinned=True, query=pinned_query_for(thread.title)
+    )
+
+    if is_error(pinned):
+        return FeedbackError.NOT_FOUND
+
+    logger.info("Thread pinned.", extra={"thread_id": thread.id})
 
     return FeedbackOutcome(interests=interests, source_weight_changes=())
 

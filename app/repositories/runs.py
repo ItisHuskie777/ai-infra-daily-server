@@ -57,6 +57,18 @@ class RunRepository:
 
         return 0 if row is None else int(str(row["failures"]))
 
+    async def prune_before(self, before: datetime) -> int:
+        """Run and source-run history older than `before`."""
+        runs = await self._db.execute(
+            "DELETE FROM runs WHERE started_at < ? AND finished_at IS NOT NULL",
+            (to_iso(before),),
+        )
+        source_runs = await self._db.execute(
+            "DELETE FROM source_runs WHERE started_at < ?", (to_iso(before),)
+        )
+
+        return runs + source_runs
+
     async def start(self, run_id: str, *, now: datetime) -> None:
         await self._db.execute(
             "INSERT INTO runs (id, started_at, stage) VALUES (?,?,?)",

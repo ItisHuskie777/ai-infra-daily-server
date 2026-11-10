@@ -3,7 +3,6 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
-from pathlib import Path
 
 from app import logging
 from app import settings
@@ -38,13 +37,13 @@ from app.sources import seeds
 
 logger = logging.get_logger(__name__)
 
-_DRY_RUN_DIRECTORY = Path("data")
-
 
 class RunOutcome(Model):
     digest_id: str | None
     reason: str
     failed: bool = False
+    # The rendered digest of a dry run; the caller decides where it goes.
+    preview_html: str | None = None
 
 
 class _Finished(Model):
@@ -124,7 +123,7 @@ async def _rank_and_select(
         return f"ranking failed: {ranked}"
 
     await ctx.runs.set_stage(run_id, "select")
-    pinned = await ctx.threads.list_pinned()
+    pinned = await ctx.threads.list_pinned(since=threads.inactive_since(now))
 
     return select.select_for_digest(
         ranked,
@@ -221,18 +220,6 @@ def _build_digest(
     )
 
 
-async def _write_preview(digest: Digest) -> Path:
-    path = _DRY_RUN_DIRECTORY / f"digest-{digest.date}.html"
-
-    def write() -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(digest.html, encoding="utf-8")
-
-    await asyncio.to_thread(write)
-
-    return path
-
-
 async def _deliver(
     ctx: AbstractContext,
     digest: Digest,
@@ -242,12 +229,13 @@ async def _deliver(
     dry_run: bool,
 ) -> _Finished:
     if dry_run:
-        path = await _write_preview(digest)
-        logger.info("Dry run: digest written to disk.", extra={"path": str(path)})
+        logger.info("Dry run: digest built, not sent.", extra={"digest_id": digest.id})
 
         return _Finished(
             status="dry_run",
-            outcome=RunOutcome(digest_id=digest.id, reason=f"dry run: {path}"),
+            outcome=RunOutcome(
+                digest_id=None, reason="dry run", preview_html=digest.html
+            ),
         )
 
     sent = await ctx.email.send(
@@ -271,9 +259,7 @@ async def _deliver(
         )
 
     await ctx.digests.set_delivery_status(digest.id, DeliveryStatus.SENT, None)
-    await ctx.preferences.save_profile(
-        profile.model_copy(update={"last_digest_date": digest.date}), now=now
-    )
+    await ctx.preferences.set_last_digest_date(digest.date, now=now)
     logger.info("Digest sent.", extra={"digest_id": digest.id, "message_id": sent})
 
     return _Finished(
@@ -333,8 +319,10 @@ async def _stages(
         sections=sections,
         health=health,
     )
-    await ctx.runs.set_stage(run_id, "persist")
-    await ctx.digests.save(digest)
+    # NOTE: A dry run leaves no digest behind, so previews never mix with real mail.
+    if not dry_run:
+        await ctx.runs.set_stage(run_id, "persist")
+        await ctx.digests.save(digest)
     await ctx.runs.set_stage(run_id, "deliver")
 
     return await _deliver(ctx, digest, now=now, profile=profile, dry_run=dry_run)
@@ -358,7 +346,9 @@ async def _resend_failed(
 async def _decide(
     ctx: AbstractContext, *, now: datetime, profile: Profile, force: bool
 ) -> schedule.ScheduleDecision | RunOutcome:
-    decision = schedule.should_send_now(profile, now)
+    decision = schedule.should_send_now(
+        profile, now, last_sent_date=await ctx.digests.latest_sent_date()
+    )
 
     if not force and not decision.send:
         logger.info("Run skipped by schedule.", extra={"reason": decision.reason})
@@ -501,7 +491,7 @@ async def run_pipeline(
     run_id: str | None = None,
 ) -> RunOutcome:
     """Fetches, groups, ranks and sends one digest; `force` ignores the delivery
-    hour and `dry_run` writes the HTML to `data/` instead of emailing it."""
+    hour and `dry_run` returns the HTML instead of storing and emailing it."""
     if run_id is None:
         run_id = new_run_id()
 

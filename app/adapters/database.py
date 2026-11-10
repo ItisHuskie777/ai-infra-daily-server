@@ -12,11 +12,22 @@ import aiosqlite
 
 from app import logging
 from app import settings
+from app.result import OnSuccess
+from app.result import ServiceError
+from app.result import is_error
 
 type Row = Mapping[str, object]
 type Params = Sequence[object]
 
 logger = logging.get_logger(__name__)
+
+
+class DatabaseError(ServiceError):
+    MIGRATION_FAILED = "migration_failed"
+
+    @override
+    def service(self) -> str:
+        return "database"
 
 
 class ImplementsDatabase(ABC):
@@ -40,9 +51,17 @@ class ImplementsDatabase(ABC):
     async def fetch_all(self, sql: str, params: Params = ()) -> list[Row]: ...
 
     @abstractmethod
-    async def migrate(self, directory: Path) -> list[str]:
-        """Applies every `*.sql` file not yet recorded, in name order; returns the
-        names applied."""
+    async def transaction(self, statements: Sequence[tuple[str, Params]]) -> None:
+        """Runs the statements as one unit: all of them take effect or none does."""
+
+    @abstractmethod
+    async def migrate(self, directory: Path) -> OnSuccess[list[str]]:
+        """Applies every `*.sql` file not yet recorded, in name order, each in its own
+        transaction; returns the names applied. Safe to run from several processes."""
+
+    @abstractmethod
+    async def backup(self, path: Path) -> None:
+        """Writes a consistent copy of the live database to `path`."""
 
 
 class SqliteDatabase(ImplementsDatabase):
@@ -114,8 +133,26 @@ class SqliteDatabase(ImplementsDatabase):
         return [_to_mapping(row) for row in rows]
 
     @override
-    async def migrate(self, directory: Path) -> list[str]:
+    async def transaction(self, statements: Sequence[tuple[str, Params]]) -> None:
         connection = await self._connected()
+
+        async with self._lock:
+            await connection.execute("BEGIN IMMEDIATE")
+
+            try:
+                for sql, params in statements:
+                    await connection.execute(sql, tuple(params))
+            except Exception:
+                await connection.rollback()
+
+                raise
+
+            await connection.commit()
+
+    @override
+    async def migrate(self, directory: Path) -> OnSuccess[list[str]]:
+        connection = await self._connected()
+        paths = await asyncio.to_thread(lambda: sorted(directory.glob("*.sql")))
         applied: list[str] = []
 
         async with self._lock:
@@ -124,31 +161,30 @@ class SqliteDatabase(ImplementsDatabase):
                 "(name TEXT PRIMARY KEY, "
                 "applied_at TEXT NOT NULL DEFAULT (datetime('now')))"
             )
-
-            async with connection.execute(
-                "SELECT name FROM schema_migrations"
-            ) as cursor:
-                done = {str(row[0]) for row in await cursor.fetchall()}
-
-            paths = await asyncio.to_thread(lambda: sorted(directory.glob("*.sql")))
+            await connection.commit()
 
             for path in paths:
-                if path.name in done:
-                    continue
-
                 script = await asyncio.to_thread(path.read_text, encoding="utf-8")
-                await connection.executescript(script)
-                await connection.execute(
-                    "INSERT INTO schema_migrations (name) VALUES (?)", (path.name,)
-                )
-                applied.append(path.name)
+                outcome = await _apply_migration(connection, path.name, script)
 
-            await connection.commit()
+                if is_error(outcome):
+                    return outcome
+
+                if outcome:
+                    applied.append(path.name)
 
         if applied:
             logger.info("Applied database migrations.", extra={"names": applied})
 
         return applied
+
+    @override
+    async def backup(self, path: Path) -> None:
+        connection = await self._connected()
+        await asyncio.to_thread(lambda: path.parent.mkdir(parents=True, exist_ok=True))
+
+        async with self._lock:
+            await connection.execute("VACUUM INTO ?", (str(path),))
 
     async def _connected(self) -> aiosqlite.Connection:
         if self._connection is None:
@@ -165,3 +201,55 @@ def _to_mapping(row: sqlite3.Row) -> Row:
 
 def default() -> ImplementsDatabase:
     return SqliteDatabase(settings.DATABASE_PATH)
+
+
+def _statements(script: str) -> list[str]:
+    """Splits a migration file into complete statements, so they can run inside one
+    transaction; `executescript` would commit before starting."""
+    statements: list[str] = []
+    buffer = ""
+
+    for line in script.splitlines(keepends=True):
+        buffer += line
+
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer.strip())
+            buffer = ""
+
+    return [statement for statement in statements if statement != ""]
+
+
+async def _apply_migration(
+    connection: aiosqlite.Connection, name: str, script: str
+) -> OnSuccess[bool]:
+    """Checks and records the migration inside an immediate transaction, so a second
+    process waits and then finds it recorded; a failing statement rolls the whole
+    file back."""
+    await connection.execute("BEGIN IMMEDIATE")
+
+    async with connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE name = ?", (name,)
+    ) as cursor:
+        recorded = await cursor.fetchone() is not None
+
+    if recorded:
+        await connection.rollback()
+
+        return False
+
+    try:
+        for statement in _statements(script):
+            await connection.execute(statement)
+
+        await connection.execute(
+            "INSERT INTO schema_migrations (name) VALUES (?)", (name,)
+        )
+    except sqlite3.Error:
+        logger.exception("Database migration failed.", extra={"migration": name})
+        await connection.rollback()
+
+        return DatabaseError.MIGRATION_FAILED
+
+    await connection.commit()
+
+    return True

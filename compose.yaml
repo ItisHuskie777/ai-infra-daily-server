@@ -33,6 +33,16 @@ services:
       # API_PUBLISH in .env picks the host address; loopback suits a reverse proxy.
       - "${API_PUBLISH:-127.0.0.1:8000}:8000"
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Wakes at the top of every hour; `aid run` exits at once outside the delivery hour.
   scheduler:
