@@ -88,6 +88,33 @@ MAX_DAILY_DELIVERY_ATTEMPTS = 3
 # A story already sent comes back only with this many new items, or a new report from a
 # primary source or the media.
 FOLLOW_UP_MIN_NEW_ITEMS = 2
+# The owner's research field (the NDTagentic reading list and the RANForge project).
+# The Research category carries only work in this field; papers on anything else are
+# left out of the digest.
+RESEARCH_FIELD = (
+    "agentic AI and LLM agents for Open RAN (O-RAN) and 6G networks: intent-based and "
+    "intent-driven network control, intent decomposition, xApp and rApp design and "
+    "conflict management, automated RAN configuration and RU/DU bring-up, network "
+    "digital twins, and explainable or neuro-symbolic reinforcement learning for RAN "
+    "control"
+)
+# Cues for the keyword fallback when the model is unavailable; matched as substrings,
+# so short tokens that occur inside common words ("ric", "rapp") are left out.
+RESEARCH_FIELD_KEYWORDS = (
+    "o-ran",
+    "open ran",
+    "6g",
+    "xapp",
+    "radio access network",
+    "base station",
+    "gnb",
+    "network slicing",
+    "digital twin",
+    "intent-based",
+    "intent-driven",
+    "intent decomposition",
+    "neuro-symbolic",
+)
 # Events scoring below this are off-topic (for example unrelated front-page stories).
 MIN_RECOMMENDATION_SCORE = 0.05
 # Compact digests carry a title and a short summary per event; the full layout adds

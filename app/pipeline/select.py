@@ -23,7 +23,7 @@ _SECTION_OF_TOPIC: dict[Topic, DigestSection] = {
     Topic.MODELS: DigestSection.MODELS,
     Topic.OPEN_SOURCE: DigestSection.MODELS,
     Topic.RESEARCH: DigestSection.RESEARCH,
-    Topic.TRAINING: DigestSection.RESEARCH,
+    Topic.TRAINING: DigestSection.MODELS,
     Topic.INFERENCE: DigestSection.INFRASTRUCTURE,
     Topic.HARDWARE: DigestSection.INFRASTRUCTURE,
     Topic.AGENTS: DigestSection.AGENTS,

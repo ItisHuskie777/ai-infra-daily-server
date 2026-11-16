@@ -22,7 +22,7 @@ TOPIC_LABELS: dict[Topic, str] = {
     Topic.TRAINING: "Training and fine-tuning",
     Topic.AGENTS: "Agents",
     Topic.TOOLING: "Developer tools",
-    Topic.RESEARCH: "Research papers",
+    Topic.RESEARCH: "Research in agentic O-RAN",
     Topic.OPEN_SOURCE: "Open-source models",
     Topic.POLICY: "Safety and policy",
     Topic.BUSINESS: "Industry and funding",
@@ -37,7 +37,9 @@ TOPIC_DESCRIPTIONS: dict[Topic, str] = {
     Topic.TRAINING: "training and fine-tuning methods, data and recipes",
     Topic.AGENTS: "agents, agent frameworks and how they are built or evaluated",
     Topic.TOOLING: "libraries, SDKs and tools for people who build with AI",
-    Topic.RESEARCH: "papers, preprints and benchmark studies, whatever their subject",
+    Topic.RESEARCH: (
+        f"papers and studies in the reader's research field: {settings.RESEARCH_FIELD}"
+    ),
     Topic.OPEN_SOURCE: "open-weight model ecosystems and licences",
     Topic.POLICY: (
         "safety, security incidents, data leaks, regulation, lawsuits, politics "

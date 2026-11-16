@@ -44,10 +44,19 @@ _RANK_SYSTEM_PROMPT = (
     "Also tag each event with one or two topics from the "
     "list given, using the topic keys exactly; put first the topic that says what "
     "kind of news the event is, since it decides the event's category. "
-    + _untrusted.RULE
+    "Use the research topic only for work in the reader's research field, as its "
+    "description says. A paper outside that field is not research: tag it by its "
+    "subject and score it below 0.2. " + _untrusted.RULE
 )
 _MAX_TOPICS_PER_EVENT = 2
 _SIGNATURE_LENGTH = 24
+# Part of every score signature, so changing the instructions or the topic list makes
+# the model score events again instead of reusing scores given under the old ones.
+_PROMPT_FINGERPRINT = hashlib.sha256(
+    "\n".join(
+        [_RANK_SYSTEM_PROMPT, *(f"{topic}: {text}" for topic, text in _TOPIC_LINES)]
+    ).encode()
+).hexdigest()
 _PROFILE_FIELDS_SEEN_BY_MODEL = frozenset(
     {
         "topics",
@@ -95,7 +104,7 @@ _TOPIC_KEYWORDS: dict[Topic, tuple[str, ...]] = {
     Topic.TRAINING: ("training", "fine-tun", "finetun", "pretrain", "rl "),
     Topic.AGENTS: ("agent", "mcp", "tool use", "workflow"),
     Topic.TOOLING: ("library", "sdk", "cli", "framework", "open-source tool"),
-    Topic.RESEARCH: ("paper", "arxiv", "benchmark", "study"),
+    Topic.RESEARCH: settings.RESEARCH_FIELD_KEYWORDS,
     Topic.OPEN_SOURCE: ("open-weight", "open weight", "open source", "hugging face"),
     Topic.POLICY: ("policy", "regulat", "law", "election", "safety", "lawsuit"),
     Topic.BUSINESS: ("funding", "raises", "acquire", "valuation", "ipo", "revenue"),
@@ -266,10 +275,13 @@ async def _score_batch(
 
 
 def _signature(event: EventWithItems, interests: Interests) -> str:
-    """Changes when the event gains or loses items or the profile the model reads
-    changes; topic weights are applied after the model and are left out."""
+    """Changes when the event gains or loses items, the profile the model reads
+    changes or the instructions change; topic weights are applied after the model and
+    are left out."""
     profile = interests.model_dump_json(include=set(_PROFILE_FIELDS_SEEN_BY_MODEL))
-    material = "\n".join([*sorted(item.id for item in event.items), profile])
+    material = "\n".join(
+        [*sorted(item.id for item in event.items), profile, _PROMPT_FINGERPRINT]
+    )
 
     return hashlib.sha256(material.encode()).hexdigest()[:_SIGNATURE_LENGTH]
 
@@ -328,13 +340,17 @@ async def _score_all(
     return scores
 
 
-def _with_paper_topic(
+def _paper_topics(
     event: EventWithItems, topics: tuple[Topic, ...], paper_sources: set[str]
-) -> tuple[Topic, ...]:
-    """An event reported only by paper feeds is filed under research, whatever the
-    paper is about."""
+) -> tuple[Topic, ...] | None:
+    """An event reported only by paper feeds is filed under research when it is in the
+    owner's research field and left out (None) when it is not; other events keep their
+    topics."""
     if not all(item.source_id in paper_sources for item in event.items):
         return topics
+
+    if Topic.RESEARCH not in topics:
+        return None
 
     return (
         Topic.RESEARCH,
@@ -419,9 +435,12 @@ async def rank_events(
         source.id for source in sources if source.category is SourceCategory.PAPER
     }
     topics = {
-        event.id: _with_paper_topic(event, scores[event.id].topics, paper_sources)
+        event.id: found
         for event in eligible
+        if (found := _paper_topics(event, scores[event.id].topics, paper_sources))
+        is not None
     }
+    eligible = [event for event in eligible if event.id in topics]
 
     threads = await _load_threads(ctx, eligible)
     now = ctx.clock.now()

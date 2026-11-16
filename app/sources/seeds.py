@@ -229,6 +229,19 @@ _PAPER_SOURCES: tuple[Source, ...] = (
         SourceCategory.PAPER,
         "http://export.arxiv.org/rss/cs.DC",
     ),
+    # Networking and signal processing, where O-RAN and 6G papers are filed.
+    _rss(
+        "arxiv-cs-ni",
+        "arXiv cs.NI",
+        SourceCategory.PAPER,
+        "http://export.arxiv.org/rss/cs.NI",
+    ),
+    _rss(
+        "arxiv-eess-sp",
+        "arXiv eess.SP",
+        SourceCategory.PAPER,
+        "http://export.arxiv.org/rss/eess.SP",
+    ),
 )
 
 _COMMUNITY_SOURCES: tuple[Source, ...] = (

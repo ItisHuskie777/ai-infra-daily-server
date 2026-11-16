@@ -24,7 +24,7 @@ top-voted comments.
 
 ### FR1 Source coverage
 
-- FR1.1 Ingest from mainstream outlets and vendor blogs via RSS/Atom (OpenAI, Anthropic, Google DeepMind, Meta AI, NVIDIA, Hugging Face, Cloudflare, arXiv cs.AI/cs.LG/cs.DC, The Verge AI, MIT Tech Review AI, etc.).
+- FR1.1 Ingest from mainstream outlets and vendor blogs via RSS/Atom (OpenAI, Anthropic, Google DeepMind, Meta AI, NVIDIA, Hugging Face, Cloudflare, arXiv cs.AI/cs.LG/cs.CL/cs.DC/cs.NI and eess.SP, The Verge AI, MIT Tech Review AI, etc.).
 - FR1.2 Ingest posts from **followed individual accounts** on social platforms: Xiaohongshu (RedNote), X/Twitter, Bluesky, WeChat Official Accounts (公众号), Zhihu, Bilibili, YouTube, Substack newsletters, personal blogs.
 - FR1.3 Ingest community discussion: Hacker News (stories + top comments), Reddit (r/MachineLearning, r/LocalLLaMA; top posts; the public feed carries no comments), Xiaohongshu top comments on followed posts.
 - FR1.4 Sources are configuration, not code: each source has a kind (rss, hn, reddit, bluesky, youtube, xiaohongshu, x), an identifier, an enabled flag, a weight between 0.2 and 2.0 and a category (media, vendor, author, community, paper). The owner can add, disable or reweight sources without a deploy (`aid sources`, `PATCH /api/sources/{id}`).
@@ -57,6 +57,7 @@ top-voted comments.
 - FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
 - FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Every category gets its best events up to a per-category budget (10, 15 or 20 by digest style), so no single category fills the digest; a category with less news shows what it has.
 - FR5.7 Before the email is composed, one editor pass over the selection merges entries that report the same story (including the same news in English and Chinese) and drops stories that only repeat what was sent in the last few days. Within a category, forum-only entries (Reddit, Hacker News) beyond three and entries from one source beyond two only fill places that nothing better takes.
+- FR5.8 The research category is limited to the owner's research field (`RESEARCH_FIELD` in `app/settings.py`: agentic AI for O-RAN and 6G, intent-driven control, network digital twins, neuro-symbolic RL for RAN). Papers outside the field are left out of the digest; training news is filed under models.
 
 ### FR6 Summarisation and digest composition
 
