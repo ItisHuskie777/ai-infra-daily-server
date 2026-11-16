@@ -17,123 +17,101 @@ and operations are in [`docs/deployment.md`](docs/deployment.md).
 
 ## Contents
 
+- [Architecture](#architecture)
+- [Services and libraries used](#services-and-libraries-used)
+- [Project structure](#project-structure)
 - [How it works](#how-it-works)
-- [Code structure](#code-structure)
-- [Quick start](#quick-start)
-- [Requirements](#requirements)
+- [Local development](#local-development)
 - [Configuration](#configuration)
-- [Usage](#usage)
-- [Checks](#checks)
-- [Project layout](#project-layout)
-- [Documentation](#documentation)
+- [Commands](#commands)
+- [Deployment](#deployment)
+- [Data model](#data-model)
+- [Content sources](#content-sources)
 - [Limitations](#limitations)
+- [Documentation](#documentation)
 
-## How it works
+## Architecture
 
-```mermaid
-flowchart TB
-    subgraph SOURCES["Sources (rows in SQLite)"]
-        direction TB
-        FEEDS["RSS and Atom feeds<br/>blogs, media, arXiv,<br/>Reddit, YouTube"]
-        APIS["JSON APIs<br/>Hacker News, Bluesky"]
-        SOCIAL["Logged-in browser<br/>Xiaohongshu, X"]
-    end
-
-    subgraph TRIGGERS["What starts a run"]
-        direction TB
-        TIMER["Scheduler<br/>aid run, every hour"]
-        MANUAL["Owner<br/>POST /api/runs"]
-    end
-
-    subgraph COLLECT["Collect"]
-        direction LR
-        FETCH["fetch<br/>8 sources at a time"] --> INGEST["ingest<br/>new items, keyed by<br/>canonical URL"] --> EMBED["embed<br/>bge-m3 on the<br/>local CPU"]
-    end
-
-    subgraph GROUP["Group"]
-        direction LR
-        CLUSTER["cluster<br/>items into events,<br/>72 h window"] --> THREADS["threads<br/>the same story<br/>across days"]
-    end
-
-    subgraph CHOOSE["Choose"]
-        direction LR
-        RANK["rank<br/>model relevance and<br/>learned weights"] --> SELECT["select<br/>a budget per category"] --> REVIEW["review<br/>merge repeats,<br/>drop old stories"]
-    end
-
-    subgraph WRITE["Write and send"]
-        direction LR
-        SUMMARISE["summarise<br/>English or Chinese"] --> COMPOSE["compose<br/>one email grouped<br/>by category"] --> DELIVER["deliver<br/>through Resend"]
-    end
-
-    PREFS[("Preferences<br/>interests, topic and<br/>source weights")]
-
-    SOURCES --> COLLECT
-    TRIGGERS --> COLLECT
-    COLLECT --> GROUP
-    GROUP --> CHOOSE
-    PREFS --> CHOOSE
-    CHOOSE --> WRITE
-    WRITE --> INBOX["Owner's inbox"]
-```
-
-A run goes through four groups of stages, top to bottom in the diagram. The scheduler
-starts `aid run` at the top of every hour. The run stops at once unless the owner's
-delivery hour has come and no digest went out that day, so one digest is sent per local
-day. `POST /api/runs` starts the same run on demand.
-
-| Stage | Module | What it does |
-| --- | --- | --- |
-| fetch | `app/sources/fetch_all.py` | Reads every enabled source, 8 at a time. A source that fails is skipped and listed in the footer of the email |
-| ingest | `app/pipeline/ingest.py` | Stores the items not seen before. An item's id is the hash of its canonical URL, so the same page is stored once |
-| embed | `app/pipeline/embed.py` | Embeds each new item with `BAAI/bge-m3` on the local CPU |
-| cluster | `app/pipeline/cluster.py` | Groups the items of the last 72 hours into events by embedding similarity. An event takes new items for 36 hours |
-| threads | `app/pipeline/threads.py` | Links an event to an earlier one about the same story, which gives the "Day N of this story" badge. Pinned threads match on keywords |
-| rank | `app/pipeline/rank.py`, `recommend.py` | The model scores each event against the interest profile and tags its topics. The score is then weighted by what the owner has taught the service |
-| select | `app/pipeline/select.py` | Takes the best events of each category up to the budget and keeps a share for individual voices |
-| review | `app/pipeline/edit.py` | One model call merges entries that report the same story and drops stories that repeat the last 7 days |
-| summarise | `app/pipeline/summarise.py` | Writes a headline and a summary for each event in the language of its sources |
-| compose | `app/pipeline/compose.py` | Renders the email from `templates/digest.html.j2` with the questions and the source footer |
-| deliver | `app/pipeline/run.py` | Stores the digest, then sends it through Resend. A digest that did not go out is sent again the next hour, up to 3 failed attempts a day |
-
-Sources are rows in SQLite with a kind, a category, a weight and an enabled flag. The
-owner disables or reweights one with `aid sources` or the API, without a deploy.
-
-### Ranking and learning
-
-`app/pipeline/recommend.py` holds the scoring as pure functions. The model scores each
-event against the interest profile and tags it with topics from a fixed list. The
-recommendation score multiplies that relevance by the strongest source weight, the
-owner's weight for the topics, a coverage boost (several independent sources), a
-freshness decay and a penalty for events with next to no text. Repeats of a story
-already ranked higher are held back.
+### Overall system
 
 ```mermaid
-flowchart LR
-    EMAIL["Email<br/>quiz and feedback links"] --> PAGE["Confirmation page<br/>aid serve"]
-    PAGE -- "owner confirms" --> PREFS[("Preferences in SQLite<br/>topic and source weights")]
-    OWNER["aid prefs, aid sources<br/>PUT /api/preferences"] --> PREFS
-    PREFS --> RANK["rank stage<br/>of the next run"]
+graph TB
+    OWNER["Owner<br/>terminal or curl"]
+    LOOP["scheduler service<br/>deploy/scheduler.sh, every hour:<br/>aid maintain, aid run"]
+    API["api service (aid serve, FastAPI)<br/>public: /feedback, /quiz, /api/health<br/>owner API under /api, bearer token"]
+    PIPELINE["Pipeline run (app/pipeline/run.py)<br/>fetch, ingest, embed, cluster, threads, rank,<br/>select, review, summarise, compose, deliver"]
+    EMBEDDER["fastembed<br/>BAAI/bge-m3, local ONNX"]
+    DB[("SQLite (data/aid.sqlite3)<br/>sources, items, events, threads,<br/>digests, feedback, preferences, runs")]
+    SOURCES["Sources<br/>feeds and public APIs over HTTP,<br/>Xiaohongshu and X through Chromium"]
+    LLM["DeepSeek API<br/>ranking, review, summaries"]
+    RESEND["Resend API<br/>email delivery"]
+    INBOX["Owner's inbox<br/>the daily digest"]
+
+    OWNER -->|"owner API"| API
+    API -->|"POST /api/runs"| PIPELINE
+    LOOP -->|"starts"| PIPELINE
+    PIPELINE -->|"fetch"| SOURCES
+    PIPELINE -->|"embed items"| EMBEDDER
+    PIPELINE -->|"JSON prompts"| LLM
+    PIPELINE -->|"send"| RESEND
+    PIPELINE <--->|"read/write"| DB
+    API <--->|"read/write"| DB
+    RESEND --> INBOX
+    INBOX -.->|"quiz and feedback links"| API
+
+    classDef outside stroke-dasharray: 6 4
+    class OWNER,SOURCES,LLM,RESEND,INBOX outside
 ```
 
-Topic weights start neutral. They move with the per-event feedback links and with the
-one or two multiple-choice questions at the foot of every email
-(`app/pipeline/quiz.py`). A link opens a confirmation page, and the weights change when
-the owner confirms. `aid prefs show` prints them.
+Solid boxes run on the server and dashed boxes are outside it. The `scheduler` and `api`
+services are two containers of one Docker image. They share the SQLite file, the
+embedding model cache and the dry-run previews through the `./data` directory.
 
-### Selection and writing
+A pipeline run is started by the scheduler every hour or by `POST /api/runs`. A lease in
+the database lets only one run work at a time. The dotted line is the feedback loop:
+the links in the email open the API, and what the owner confirms there changes the
+weights that the next run ranks with.
 
-The email is organised by category, taken from each event's main topic. Every category
-gets its best events up to a budget of 10, 15 or 20 by digest style, so no single
-category fills the digest. By default an event is a title and a short summary
-(`DIGEST_COMPACT` in `app/settings.py`).
+### Daily run sequence
 
-Before the email is composed, the review stage merges entries that report the same
-story and drops stories that only repeat the last few days. Headlines and summaries
-follow the house style in `app/pipeline/_style.py`, taken from the owner's humanizer
-guide: plain sentence-case headlines, summaries that name who did what, and no dashes
-or stock phrasing.
+```mermaid
+sequenceDiagram
+    participant SCHED as Scheduler
+    participant RUN as Pipeline run
+    participant DB as SQLite
+    participant SRC as Sources
+    participant LLM as DeepSeek
+    participant MAIL as Resend
+    participant OWNER as Owner
 
-## Code structure
+    SCHED->>RUN: aid run (every hour)
+    RUN->>DB: Run lease, profile
+    DB-->>RUN: Due now, not sent today
+    RUN->>SRC: Fetch enabled sources
+    SRC-->>RUN: Items and source health
+    RUN->>DB: Store new items
+    RUN->>RUN: Embed new items (bge-m3, local)
+    RUN->>DB: Events and threads
+    RUN->>LLM: Score and tag events
+    LLM-->>RUN: Relevance and topics
+    RUN->>RUN: Select per category
+    RUN->>LLM: Review the selection
+    LLM-->>RUN: Entries to merge or drop
+    RUN->>LLM: Summarise each event
+    LLM-->>RUN: Headline and summary
+    RUN->>DB: Save the digest as pending
+    RUN->>MAIL: POST /emails
+    MAIL-->>OWNER: Digest delivered
+    RUN->>DB: Mark the digest sent
+    OWNER->>DB: Quiz answers update the weights (HTTP API)
+```
+
+The scheduler starts `aid run` at the top of every hour. The run stops at once unless
+the owner's delivery hour has come and no digest went out that day, so one digest is
+sent per local day. The digest is saved before it is sent, so a failed delivery is
+retried the next hour with the same digest and without another round of model calls.
+
+### Code layers
 
 ```mermaid
 flowchart TB
@@ -185,7 +163,141 @@ those packages. `cli` and `api` are the entry points that build the context.
 
 Expected failures are returned as values (`OnSuccess[T]`), never raised.
 
-## Quick start
+## Services and libraries used
+
+| Service or library | Role |
+| --- | --- |
+| Docker Compose | Runs the `api` and `scheduler` services from one image on the server |
+| SQLite (aiosqlite) | All state: sources, items with their embedding vectors, events, threads, digests, feedback, preferences and run history |
+| DeepSeek API (openai client) | Scores and tags events, reviews the selection and writes the summaries. Every reply is JSON and is validated before use |
+| fastembed | Runs the `BAAI/bge-m3` embedding model on the local CPU (ONNX) for deduplication, clustering and threads |
+| httpx, feedparser | Fetch and parse feeds and public APIs |
+| Playwright Chromium | Reads Xiaohongshu and X with the owner's logged-in cookie |
+| Resend API | Delivers the email |
+| FastAPI, uvicorn | The HTTP API: confirmation pages for the email links, health and the owner API |
+| Jinja2 | The email template |
+| Pydantic | Frozen models for every domain object and for the model replies |
+| uv, ruff, mypy | Dependency management, formatting, linting and strict type checking |
+
+## Project structure
+
+```
+/
+├── app/
+│   ├── cli.py                # The `aid` command
+│   ├── api/                  # FastAPI app, bearer auth, routes
+│   ├── pipeline/             # One module per stage, plus scoring and feedback
+│   │   ├── run.py            # Runs the stages in order, holds the run lease
+│   │   ├── ingest.py, embed.py, cluster.py, threads.py
+│   │   ├── rank.py, recommend.py, select.py, edit.py
+│   │   ├── summarise.py, compose.py, quiz.py, links.py
+│   │   ├── feedback.py, feedback_token.py, schedule.py
+│   │   └── maintain.py, preview.py
+│   ├── sources/              # One adapter per source kind, fetch_all, seeds, registry
+│   ├── context.py            # AbstractContext, the production Context and default()
+│   ├── repositories/         # One class per stored resource; all SQL lives here
+│   ├── adapters/             # http, llm, embeddings, browser, email, clock, ids, database
+│   ├── models.py             # Frozen Pydantic models for every domain object
+│   ├── vectors.py            # The embedding vector type and its arithmetic
+│   ├── result.py             # ServiceError base, OnSuccess[T], is_error / is_success
+│   ├── logging.py            # JSON logging with scoped fields (run_id, source_id)
+│   └── settings.py           # Flat configuration read from the environment at import time
+├── migrations/               # Numbered SQL files applied by `aid migrate`
+├── templates/                # The Jinja template of the email
+├── deploy/                   # Dockerfile, scheduler script, optional systemd units, Caddyfile
+├── compose.yaml              # The api and scheduler services
+├── docs/                     # Requirements, deployment, seeded sources, cookie notes
+└── data/                     # SQLite database, model cache, dry-run previews (git-ignored)
+```
+
+## How it works
+
+### Owner flow
+
+1. Run `aid migrate` and `aid seed` once. The database now holds 51 default sources.
+2. Set the recipient, the delivery hour and the topics with `aid prefs` or
+   `PUT /api/preferences`.
+3. Every hour the scheduler starts a run. At the delivery hour the run fetches the
+   sources, groups the items into events, ranks and selects them, writes the summaries
+   and sends one email grouped by category.
+4. Answer the one or two questions at the foot of the email. Each link opens a
+   confirmation page, and the answer changes the next day's ranking when confirmed.
+5. Run `aid run --force --dry-run` at any time to build a digest without sending it.
+   The HTML is written to `data/digest-<date>.html`.
+
+### What a run does
+
+| Stage | Module | What it does |
+| --- | --- | --- |
+| fetch | `app/sources/fetch_all.py` | Reads every enabled source, 8 at a time. A source that fails is skipped and listed in the footer of the email |
+| ingest | `app/pipeline/ingest.py` | Stores the items not seen before. An item's id is the hash of its canonical URL, so the same page is stored once |
+| embed | `app/pipeline/embed.py` | Embeds each new item with `BAAI/bge-m3` on the local CPU |
+| cluster | `app/pipeline/cluster.py` | Groups the items of the last 72 hours into events by embedding similarity. An event takes new items for 36 hours |
+| threads | `app/pipeline/threads.py` | Links an event to an earlier one about the same story, which gives the "Day N of this story" badge. Pinned threads match on keywords |
+| rank | `app/pipeline/rank.py`, `recommend.py` | The model scores each event against the interest profile and tags its topics. The score is then weighted by what the owner has taught the service |
+| select | `app/pipeline/select.py` | Takes the best events of each category up to the budget and keeps a share for individual voices |
+| review | `app/pipeline/edit.py` | One model call merges entries that report the same story and drops stories that repeat the last 7 days |
+| summarise | `app/pipeline/summarise.py` | Writes a headline and a summary for each event in the language of its sources |
+| compose | `app/pipeline/compose.py` | Renders the email from `templates/digest.html.j2` with the questions and the source footer |
+| deliver | `app/pipeline/run.py` | Stores the digest, then sends it through Resend. A digest that did not go out is sent again the next hour, up to 3 failed attempts a day |
+
+### Ranking and learning
+
+`app/pipeline/recommend.py` holds the scoring as pure functions. The model scores each
+event against the interest profile and tags it with topics from a fixed list. The
+recommendation score multiplies that relevance by the strongest source weight, the
+owner's weight for the topics, a coverage boost (several independent sources), a
+freshness decay and a penalty for events with next to no text. Repeats of a story
+already ranked higher are held back.
+
+Topic weights start neutral. They move with the per-event feedback links and with the
+one or two multiple-choice questions at the foot of every email
+(`app/pipeline/quiz.py`). A link opens a confirmation page, and the weights change when
+the owner confirms. `aid prefs show` prints them.
+
+### Selection and writing
+
+The email is organised by category, taken from each event's main topic. Every category
+gets its best events up to a budget of 10, 15 or 20 by digest style, so no single
+category fills the digest. By default an event is a title and a short summary
+(`DIGEST_COMPACT` in `app/settings.py`).
+
+Before the email is composed, the review stage merges entries that report the same
+story and drops stories that only repeat the last few days. Headlines and summaries
+follow the house style in `app/pipeline/_style.py`, taken from the owner's humanizer
+guide: plain sentence-case headlines, summaries that name who did what, and no dashes
+or stock phrasing.
+
+### Running unattended
+
+- A source that fails is skipped and reported in the footer of the email. The run
+  carries on with the others.
+- A run that is killed leaves a lease that expires after 90 minutes, and the next run
+  marks it as abandoned.
+- A digest that did not go out is sent again the next hour. After 3 failed attempts in
+  one local day the service waits for the next day.
+- `aid maintain` runs every hour. It removes the text and vectors of items older than
+  30 days and keeps one database backup per day for 7 days.
+- `GET /api/health` and `aid runs list` show the last run, its last stage and its
+  error.
+
+## Local development
+
+### Prerequisites
+
+| Requirement | Version or size | Notes |
+| --- | --- | --- |
+| Operating system | Linux | The commands in this file were run on Ubuntu under WSL2 |
+| Python | 3.14 | Pinned in `.python-version`; `uv` installs it |
+| uv | 0.13.7 | The version in `deploy/Dockerfile` and the one used here |
+| Free RAM | 4 GB | The `BAAI/bge-m3` embedding model uses about 3 GB while a run embeds new items |
+| Disk | 6 GB for the Docker deployment | Image 2.8 GB, embedding model 2.2 GB |
+| Docker with Compose v2 | any current release | Server deployment only |
+| DeepSeek API key | | Ranking and summaries. Without it no digest can be written |
+| Resend API key | | Sending the email. A dry run does not need it |
+| Chromium | installed by Playwright | Only for the Xiaohongshu and X sources: `uv run playwright install chromium` |
+
+### Setup
 
 ```bash
 uv sync --all-groups
@@ -208,21 +320,14 @@ run normally takes 15 to 20 minutes.
 variable is missing. `UV_ENV_FILE=.env` makes every `uv run` in that shell load the
 file. `uv run --env-file .env aid ...` does the same for one command.
 
-To run it as a service, follow [`docs/deployment.md`](docs/deployment.md).
+### Checks
 
-## Requirements
+```bash
+uv run ruff format --check && uv run ruff check && uv run mypy
+```
 
-| Requirement | Version or size | Notes |
-| --- | --- | --- |
-| Operating system | Linux | The commands in this file were run on Ubuntu under WSL2 |
-| Python | 3.14 | Pinned in `.python-version`; `uv` installs it |
-| uv | 0.13.7 | The version in `deploy/Dockerfile` and the one used here |
-| Free RAM | 4 GB | The `BAAI/bge-m3` embedding model uses about 3 GB while a run embeds new items |
-| Disk | 6 GB for the Docker deployment | Image 2.8 GB, embedding model 2.2 GB |
-| Docker with Compose v2 | any current release | Server deployment only |
-| DeepSeek API key | | Ranking and summaries. Without it no digest can be written |
-| Resend API key | | Sending the email. A dry run does not need it |
-| Chromium | installed by Playwright | Only for the Xiaohongshu and X sources: `uv run playwright install chromium` |
+CI runs the same three commands on every push to `main` and on every pull request
+(`.github/workflows/ci.yml`). `mypy` runs in strict mode.
 
 ## Configuration
 
@@ -248,7 +353,7 @@ must be present, even when its value is empty.
 Generate the two secrets with `openssl rand -hex 32`. Tuning constants that are not
 secrets (thresholds, budgets, retention) are plain values in `app/settings.py`.
 
-## Usage
+## Commands
 
 Every command is `uv run aid <command>` locally, or
 `docker compose run --rm aid aid <command>` on the server.
@@ -287,49 +392,79 @@ The HTTP API serves the confirmation pages behind the email links (`/feedback`,
 needs no token and reports the last run and the last day a digest went out. The owner
 endpoints are listed in [`docs/deployment.md`](docs/deployment.md).
 
-## Checks
+## Deployment
 
 ```bash
-uv run ruff format --check && uv run ruff check && uv run mypy
+cp .env.example .env
+docker compose build
+docker compose run --rm aid aid migrate
+docker compose run --rm aid aid seed
+docker compose run --rm aid aid run --force --dry-run
+docker compose up -d
 ```
 
-CI runs the same three commands on every push to `main` and on every pull request
-(`.github/workflows/ci.yml`). `mypy` runs in strict mode.
+Fill in `.env` before the first run. The dry run writes a preview to
+`data/digest-<date>.html`, and `docker compose up -d` starts the API and the hourly
+scheduler. [`docs/deployment.md`](docs/deployment.md) has the full steps, HTTPS with
+Caddy, cookie refresh, updating and troubleshooting.
 
-## Project layout
+## Data model
 
-```
-app/
-  settings.py        flat configuration read from the environment at import time
-  logging.py         JSON logging with scoped fields (run_id, source_id)
-  result.py          ServiceError base, OnSuccess[T], is_error / is_success
-  models.py          frozen Pydantic models for every domain object
-  vectors.py         the embedding vector type and its arithmetic
-  context.py         AbstractContext, the production Context and default()
-  adapters/          http, llm, embeddings, browser, email, clock, ids, database
-  repositories/      one class per stored resource; all SQL lives here
-  sources/           one adapter per source kind, fetch_all, seeds, registry
-  pipeline/          ingest, embed, cluster, threads, rank, recommend, select, edit,
-                     summarise, compose, quiz, links, feedback, feedback_token,
-                     schedule, run, maintain, preview
-  api/               FastAPI app, bearer auth, routes
-  cli.py             the `aid` command
-migrations/          numbered SQL files applied by `aid migrate`
-templates/           the Jinja template of the email
-compose.yaml         api and scheduler services
-deploy/              Dockerfile, scheduler script, optional systemd units, Caddyfile
-docs/                requirements, deployment, seeded sources, per-platform cookie notes
-data/                SQLite database, model cache and dry-run previews (git-ignored)
-```
+Everything is stored in one SQLite file. The tables are created by the files in
+`migrations/`.
 
-## Documentation
-
-| File | Contents |
+| Table | Contents |
 | --- | --- |
-| [`docs/requirements.md`](docs/requirements.md) | Functional requirements, quality attributes and the source feasibility table |
-| [`docs/deployment.md`](docs/deployment.md) | Server setup with Docker, HTTPS, cookie refresh, updating, the owner API and troubleshooting |
-| [`docs/sources.md`](docs/sources.md) | The seeded sources and the live audit of them |
-| [`docs/xiaohongshu.md`](docs/xiaohongshu.md), [`docs/x.md`](docs/x.md) | How each platform is read and how to renew its cookie |
+| `sources` | One row per source: kind, category, language, `enabled`, `weight` and the kind-specific config |
+| `source_runs` | One row per fetch attempt per source, for the health footer of the email |
+| `items` | Fetched posts and articles, keyed by the hash of the canonical URL. The embedding is stored inline as float32 bytes |
+| `events` | Items about the same story, with the model scores cached per event |
+| `threads` | Events about the same story across days, with the day count and the pin |
+| `digests` | Every digest built: date, subject, HTML, source health and delivery status |
+| `digest_events` | Which events and items appeared in which digest, with section, position, score and topics |
+| `feedback` | Each feedback link that acted. A link acts once |
+| `quiz_answers` | The answers to the questions in the email |
+| `preferences` | Two JSON documents, `profile` and `interests` |
+| `runs`, `run_lease` | One row per pipeline run with its stage and outcome, and the lease that allows one run at a time |
+
+The two preference documents:
+
+```python
+profile = {
+    "email": str,
+    "timezone": str,
+    "delivery_hour": int,              # 0 to 23
+    "digest_style": "brief" | "balanced" | "deep",
+}
+interests = {
+    "topics": [str],
+    "keywords_include": [str],
+    "keywords_exclude": [str],
+    "followed_authors": [str],
+    "preferred_sources": [str],
+    "blocked_sources": [str],
+    "technical_depth": "high-level" | "practical" | "deep",
+    "topic_weights": {topic: float},   # learned; a missing topic counts as 1.0
+}
+```
+
+## Content sources
+
+`aid seed` inserts 51 sources from `app/sources/seeds.py`. The list with every feed
+address is in [`docs/sources.md`](docs/sources.md).
+
+| Kind | Seeded | How it is read |
+| --- | --- | --- |
+| `rss` | 31 | RSS and Atom feeds: 10 vendor blogs, 7 media outlets, 6 paper feeds, 8 personal blogs |
+| `bluesky` | 9 | Author feeds from the public Bluesky API |
+| `hn` | 4 | Hacker News through the Algolia API, with the top comments |
+| `youtube` | 3 | The Atom feed of each channel |
+| `reddit` | 2 | The public Atom feed of r/MachineLearning and r/LocalLLaMA |
+| `xiaohongshu` | 1 | The following feed in a logged-in browser. Off until a cookie is set |
+| `x` | 1 | The home timeline in a logged-in browser. Off until a cookie is set |
+
+Add or change a source in `app/sources/seeds.py` and run `aid seed`. Switch one off or
+change its weight with `aid sources`.
 
 ## Limitations
 
@@ -347,3 +482,12 @@ data/                SQLite database, model cache and dry-run previews (git-igno
   through the email questions, `aid prefs` and `PUT /api/preferences`.
 - The threshold that links an event to an earlier thread (`THREAD_SIMILARITY_THRESHOLD`)
   is provisional. It was set from one day of data.
+
+## Documentation
+
+| File | Contents |
+| --- | --- |
+| [`docs/requirements.md`](docs/requirements.md) | Functional requirements, quality attributes and the source feasibility table |
+| [`docs/deployment.md`](docs/deployment.md) | Server setup with Docker, HTTPS, cookie refresh, updating, the owner API and troubleshooting |
+| [`docs/sources.md`](docs/sources.md) | The seeded sources and the live audit of them |
+| [`docs/xiaohongshu.md`](docs/xiaohongshu.md), [`docs/x.md`](docs/x.md) | How each platform is read and how to renew its cookie |
