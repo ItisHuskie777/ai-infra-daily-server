@@ -308,7 +308,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aid", description="AI Infra Daily")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("migrate", help="apply pending database migrations")
-    commands.add_parser("seed", help="insert the default sources that are missing")
+    commands.add_parser(
+        "seed", help="insert missing default sources and refresh the others"
+    )
     run_parser = commands.add_parser("run", help="run the whole digest pipeline")
     run_parser.add_argument("--force", action="store_true", help="ignore the hour")
     run_parser.add_argument(
