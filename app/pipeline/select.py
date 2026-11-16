@@ -117,22 +117,35 @@ def fresh_events(
     return fresh
 
 
-def _limit_community(candidates: Sequence[_Candidate], limit: int) -> list[_Candidate]:
-    """Keeps at most `limit` events that only forum threads cover (Reddit, Hacker
-    News), so a category is not filled with questions and opinion posts."""
-    kept: list[_Candidate] = []
+def _prefer_variety(candidates: Sequence[_Candidate]) -> list[_Candidate]:
+    """Rank order, except that forum-only events (Reddit, Hacker News) beyond a few,
+    and more than two events led by the same source, move to the back: they still
+    fill a category that has nothing better, but never push out a report."""
+    preferred: list[_Candidate] = []
+    overflow: list[_Candidate] = []
     community = 0
+    per_source: dict[str, int] = {}
 
     for candidate in candidates:
-        if candidate.community_only:
-            if community == limit:
-                continue
+        source = candidate.items[0].source_id
+        too_many_forum = (
+            candidate.community_only
+            and community >= settings.COMMUNITY_EVENTS_PER_CATEGORY
+        )
+        too_many_from_source = (
+            per_source.get(source, 0) >= settings.EVENTS_PER_SOURCE_PER_CATEGORY
+        )
 
-            community += 1
+        if too_many_forum or too_many_from_source:
+            overflow.append(candidate)
 
-        kept.append(candidate)
+            continue
 
-    return kept
+        community += candidate.community_only
+        per_source[source] = per_source.get(source, 0) + 1
+        preferred.append(candidate)
+
+    return [*preferred, *overflow]
 
 
 def _by_section(
@@ -181,7 +194,7 @@ def _pick_with_voice_share(
 ) -> list[_Candidate]:
     """The first `limit` candidates in the order given, with pinned threads always
     kept (FR4.2) and voice events swapped in from below the cut until their share is
-    met (FR5.2); the result is back in rank order."""
+    met (FR5.2); the result keeps the order given, so preferred events lead."""
     pinned = [c for c in candidates if _is_pinned(c, pinned_thread_ids)]
     others = [c for c in candidates if not _is_pinned(c, pinned_thread_ids)]
     budget = max(0, limit - len(pinned))
@@ -201,7 +214,9 @@ def _pick_with_voice_share(
         selected[replaceable[-1]] = reserve.pop(0)
         voice_count += 1
 
-    return sorted([*pinned, *selected], key=lambda candidate: candidate.rank)
+    order = {candidate.event.id: index for index, candidate in enumerate(candidates)}
+
+    return sorted([*pinned, *selected], key=lambda candidate: order[candidate.event.id])
 
 
 def select_for_digest(
@@ -230,18 +245,17 @@ def select_for_digest(
         is not None
     ]
 
-    chosen = sorted(
-        (
-            candidate
-            for queue in _by_section(candidates).values()
-            for candidate in _pick_with_voice_share(
-                _limit_community(queue, settings.COMMUNITY_EVENTS_PER_CATEGORY),
-                limit=settings.DIGEST_EVENTS_PER_CATEGORY[style] + spare,
-                pinned_thread_ids=pinned_thread_ids,
-            )
-        ),
-        key=lambda candidate: candidate.rank,
-    )
+    # NOTE: Each category stays in preference order (reports first, overflow last),
+    # so `trim_to_budget` cuts the overflow rather than a lower-ranked report.
+    chosen = [
+        candidate
+        for queue in _by_section(candidates).values()
+        for candidate in _pick_with_voice_share(
+            _prefer_variety(queue),
+            limit=settings.DIGEST_EVENTS_PER_CATEGORY[style] + spare,
+            pinned_thread_ids=pinned_thread_ids,
+        )
+    ]
 
     return _numbered(
         [

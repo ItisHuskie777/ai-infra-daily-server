@@ -56,8 +56,10 @@ SAME_ORIGIN_SIMILARITY_THRESHOLD = 0.80
 THREAD_SIMILARITY_THRESHOLD = 0.72
 DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 INDIVIDUAL_VOICE_MIN_SHARE = 0.3
-# Events covered only by forum threads (Reddit, Hacker News) allowed per category.
+# Per category, forum-only events and events from one source beyond these counts only
+# fill places that nothing better takes.
 COMMUNITY_EVENTS_PER_CATEGORY = 3
+EVENTS_PER_SOURCE_PER_CATEGORY = 2
 # Extra events per category the editor review may merge or drop before the cut.
 EDITOR_SPARE_PER_CATEGORY = 4
 # Recommendation score: relevance x source weight x the factors below.

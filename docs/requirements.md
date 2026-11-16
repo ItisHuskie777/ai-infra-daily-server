@@ -56,7 +56,7 @@ top-voted comments.
 - FR5.4 The ranking model also tags every event with one or two topics from a fixed taxonomy. The final recommendation score is the product of the model's relevance, the strongest source weight, the owner's learned weight for the event's topics, a boost for coverage by several independent sources, a freshness decay and a penalty for events with almost no body text.
 - FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
 - FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Every category gets its best events up to a per-category budget (10, 15 or 20 by digest style), so no single category fills the digest; a category with less news shows what it has.
-- FR5.7 Before the email is composed, one editor pass over the selection merges entries that report the same story (including the same news in English and Chinese) and drops stories that only repeat what was sent in the last few days. At most three entries per category may come from forum threads alone (Reddit, Hacker News).
+- FR5.7 Before the email is composed, one editor pass over the selection merges entries that report the same story (including the same news in English and Chinese) and drops stories that only repeat what was sent in the last few days. Within a category, forum-only entries (Reddit, Hacker News) beyond three and entries from one source beyond two only fill places that nothing better takes.
 
 ### FR6 Summarisation and digest composition
 
