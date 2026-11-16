@@ -11,19 +11,179 @@ by category.
 One or two questions at the foot of the email tune the next day's ranking. Each link
 opens a confirmation page, and the answer applies when the owner confirms.
 
-The product requirements are in [`docs/requirements.md`](docs/requirements.md). This is
-the Python 3.14 rewrite of a Cloudflare Workers prototype. It runs on one Linux server.
+This is the Python 3.14 rewrite of a Cloudflare Workers prototype. It runs on one Linux
+server. The full scope is in [`docs/requirements.md`](docs/requirements.md), and setup
+and operations are in [`docs/deployment.md`](docs/deployment.md).
 
 ## Contents
 
+- [How it works](#how-it-works)
+- [Code structure](#code-structure)
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Checks](#checks)
-- [How it works](#how-it-works)
 - [Project layout](#project-layout)
+- [Documentation](#documentation)
 - [Limitations](#limitations)
+
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph SOURCES["Sources (rows in SQLite)"]
+        direction TB
+        FEEDS["RSS and Atom feeds<br/>blogs, media, arXiv,<br/>Reddit, YouTube"]
+        APIS["JSON APIs<br/>Hacker News, Bluesky"]
+        SOCIAL["Logged-in browser<br/>Xiaohongshu, X"]
+    end
+
+    subgraph TRIGGERS["What starts a run"]
+        direction TB
+        TIMER["Scheduler<br/>aid run, every hour"]
+        MANUAL["Owner<br/>POST /api/runs"]
+    end
+
+    subgraph COLLECT["Collect"]
+        direction LR
+        FETCH["fetch<br/>8 sources at a time"] --> INGEST["ingest<br/>new items, keyed by<br/>canonical URL"] --> EMBED["embed<br/>bge-m3 on the<br/>local CPU"]
+    end
+
+    subgraph GROUP["Group"]
+        direction LR
+        CLUSTER["cluster<br/>items into events,<br/>72 h window"] --> THREADS["threads<br/>the same story<br/>across days"]
+    end
+
+    subgraph CHOOSE["Choose"]
+        direction LR
+        RANK["rank<br/>model relevance and<br/>learned weights"] --> SELECT["select<br/>a budget per category"] --> REVIEW["review<br/>merge repeats,<br/>drop old stories"]
+    end
+
+    subgraph WRITE["Write and send"]
+        direction LR
+        SUMMARISE["summarise<br/>English or Chinese"] --> COMPOSE["compose<br/>one email grouped<br/>by category"] --> DELIVER["deliver<br/>through Resend"]
+    end
+
+    PREFS[("Preferences<br/>interests, topic and<br/>source weights")]
+
+    SOURCES --> COLLECT
+    TRIGGERS --> COLLECT
+    COLLECT --> GROUP
+    GROUP --> CHOOSE
+    PREFS --> CHOOSE
+    CHOOSE --> WRITE
+    WRITE --> INBOX["Owner's inbox"]
+```
+
+A run goes through four groups of stages, top to bottom in the diagram. The scheduler
+starts `aid run` at the top of every hour. The run stops at once unless the owner's
+delivery hour has come and no digest went out that day, so one digest is sent per local
+day. `POST /api/runs` starts the same run on demand.
+
+| Stage | Module | What it does |
+| --- | --- | --- |
+| fetch | `app/sources/fetch_all.py` | Reads every enabled source, 8 at a time. A source that fails is skipped and listed in the footer of the email |
+| ingest | `app/pipeline/ingest.py` | Stores the items not seen before. An item's id is the hash of its canonical URL, so the same page is stored once |
+| embed | `app/pipeline/embed.py` | Embeds each new item with `BAAI/bge-m3` on the local CPU |
+| cluster | `app/pipeline/cluster.py` | Groups the items of the last 72 hours into events by embedding similarity. An event takes new items for 36 hours |
+| threads | `app/pipeline/threads.py` | Links an event to an earlier one about the same story, which gives the "Day N of this story" badge. Pinned threads match on keywords |
+| rank | `app/pipeline/rank.py`, `recommend.py` | The model scores each event against the interest profile and tags its topics. The score is then weighted by what the owner has taught the service |
+| select | `app/pipeline/select.py` | Takes the best events of each category up to the budget and keeps a share for individual voices |
+| review | `app/pipeline/edit.py` | One model call merges entries that report the same story and drops stories that repeat the last 7 days |
+| summarise | `app/pipeline/summarise.py` | Writes a headline and a summary for each event in the language of its sources |
+| compose | `app/pipeline/compose.py` | Renders the email from `templates/digest.html.j2` with the questions and the source footer |
+| deliver | `app/pipeline/run.py` | Stores the digest, then sends it through Resend. A digest that did not go out is sent again the next hour, up to 3 failed attempts a day |
+
+Sources are rows in SQLite with a kind, a category, a weight and an enabled flag. The
+owner disables or reweights one with `aid sources` or the API, without a deploy.
+
+### Ranking and learning
+
+`app/pipeline/recommend.py` holds the scoring as pure functions. The model scores each
+event against the interest profile and tags it with topics from a fixed list. The
+recommendation score multiplies that relevance by the strongest source weight, the
+owner's weight for the topics, a coverage boost (several independent sources), a
+freshness decay and a penalty for events with next to no text. Repeats of a story
+already ranked higher are held back.
+
+```mermaid
+flowchart LR
+    EMAIL["Email<br/>quiz and feedback links"] --> PAGE["Confirmation page<br/>aid serve"]
+    PAGE -- "owner confirms" --> PREFS[("Preferences in SQLite<br/>topic and source weights")]
+    OWNER["aid prefs, aid sources<br/>PUT /api/preferences"] --> PREFS
+    PREFS --> RANK["rank stage<br/>of the next run"]
+```
+
+Topic weights start neutral. They move with the per-event feedback links and with the
+one or two multiple-choice questions at the foot of every email
+(`app/pipeline/quiz.py`). A link opens a confirmation page, and the weights change when
+the owner confirms. `aid prefs show` prints them.
+
+### Selection and writing
+
+The email is organised by category, taken from each event's main topic. Every category
+gets its best events up to a budget of 10, 15 or 20 by digest style, so no single
+category fills the digest. By default an event is a title and a short summary
+(`DIGEST_COMPACT` in `app/settings.py`).
+
+Before the email is composed, the review stage merges entries that report the same
+story and drops stories that only repeat the last few days. Headlines and summaries
+follow the house style in `app/pipeline/_style.py`, taken from the owner's humanizer
+guide: plain sentence-case headlines, summaries that name who did what, and no dashes
+or stock phrasing.
+
+## Code structure
+
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry points"]
+        direction TB
+        CLICMD["cli.py<br/>the aid command"]
+        HTTPAPI["api/<br/>FastAPI app, bearer auth, routes"]
+    end
+
+    subgraph LOGIC["Logic"]
+        direction TB
+        PIPELINE["pipeline/<br/>one module per stage"]
+        SOURCEKINDS["sources/<br/>one adapter per source kind"]
+    end
+
+    CONTEXT["context.py<br/>AbstractContext, handed to every stage"]
+
+    subgraph EDGE["Access to the outside"]
+        direction TB
+        REPOSITORIES["repositories/<br/>all SQL, one class per resource"]
+        ADAPTERS["adapters/<br/>one wrapper per external system"]
+    end
+
+    subgraph EXTERNAL["External systems"]
+        direction TB
+        SQLITE[("SQLite<br/>database.py")]
+        WEB["Feeds and APIs<br/>http.py"]
+        DEEPSEEK["DeepSeek<br/>llm.py"]
+        FASTEMBED["fastembed<br/>embeddings.py"]
+        CHROMIUM["Chromium<br/>browser.py"]
+        MAIL["Resend<br/>email.py"]
+    end
+
+    ENTRY --> LOGIC
+    LOGIC --> CONTEXT
+    CONTEXT --> EDGE
+    EDGE --> EXTERNAL
+```
+
+Dependencies point one way, from the top of the diagram to the bottom. The file under
+each external system is the adapter in `app/adapters/` that wraps it. `settings`,
+`logging`, `result` and `vectors` are leaves that any module may import, and `models`
+is pure data.
+
+`adapters` wrap every third party and `repositories` own the SQL. `context` bundles
+them into one object. `sources` and `pipeline` contain the logic and reach every adapter
+and repository through `AbstractContext`, importing only types and error values from
+those packages. `cli` and `api` are the entry points that build the context.
+
+Expected failures are returned as values (`OnSuccess[T]`), never raised.
 
 ## Quick start
 
@@ -136,63 +296,6 @@ uv run ruff format --check && uv run ruff check && uv run mypy
 CI runs the same three commands on every push to `main` and on every pull request
 (`.github/workflows/ci.yml`). `mypy` runs in strict mode.
 
-## How it works
-
-```
-            hourly timer                          owner (browser / curl)
-                 |                                         |
-           aid run (CLI)                           aid serve (FastAPI)
-                 |                                         |
-                 v                                         v
-  +------------------------------------------------------------------+
-  |  app.pipeline.run  ->  fetch_all -> ingest -> embed -> cluster   |
-  |      -> threads -> rank -> select -> summarise -> compose -> send |
-  |  app.api.routes    ->  /quiz, /feedback, /api/{sources,...}      |
-  +------------------------------------------------------------------+
-                 |  AbstractContext (injected)
-                 v
-  +-------------------+   +-----------------------------------------+
-  | repositories      |   | adapters                                |
-  | sources, items,   |   | http (httpx)  llm (DeepSeek)  email      |
-  | events, threads,  |   | embeddings (fastembed, local ONNX)       |
-  | digests, prefs,   |   | browser (Playwright, cookie sessions)    |
-  | runs  -> SQLite   |   | clock, ids                              |
-  +-------------------+   +-----------------------------------------+
-```
-
-Dependencies point one way. `settings`, `logging`, `result` and `vectors` are leaves and
-`models` is pure data. `adapters` wrap every third party, `repositories` own the SQL,
-and `context` bundles them. `sources` and `pipeline` contain the logic and reach every
-adapter and repository through `AbstractContext`, importing only types and error values
-from those packages. `cli` and `api` are the entry points. Expected failures are
-returned as values (`OnSuccess[T]`), never raised.
-
-### Ranking and learning
-
-`app/pipeline/recommend.py` holds the scoring as pure functions. The model scores each
-event against the interest profile and tags it with topics from a fixed list. The
-recommendation score multiplies that relevance by the strongest source weight, the
-owner's weight for the topics, a coverage boost (several independent sources), a
-freshness decay and a penalty for events with next to no text. Repeats of a story
-already ranked higher are held back.
-
-Topic weights start neutral. They move with the per-event feedback links and with the
-one or two multiple-choice questions at the foot of every email
-(`app/pipeline/quiz.py`). `aid prefs show` prints them.
-
-### Selection and writing
-
-The email is organised by category, taken from each event's main topic. Every category
-gets its best events up to a budget of 10, 15 or 20 by digest style, so no single
-category fills the digest. By default an event is a title and a short summary
-(`DIGEST_COMPACT` in `app/settings.py`).
-
-Before the email is composed, an editor pass (`app/pipeline/edit.py`) merges entries
-that report the same story and drops stories that only repeat the last few days.
-Headlines and summaries follow the house style in `app/pipeline/_style.py`, taken from
-the owner's humanizer guide: plain sentence-case headlines, summaries that name who did
-what, and no dashes or stock phrasing.
-
 ## Project layout
 
 ```
@@ -218,6 +321,15 @@ deploy/              Dockerfile, scheduler script, optional systemd units, Caddy
 docs/                requirements, deployment, seeded sources, per-platform cookie notes
 data/                SQLite database, model cache and dry-run previews (git-ignored)
 ```
+
+## Documentation
+
+| File | Contents |
+| --- | --- |
+| [`docs/requirements.md`](docs/requirements.md) | Functional requirements, quality attributes and the source feasibility table |
+| [`docs/deployment.md`](docs/deployment.md) | Server setup with Docker, HTTPS, cookie refresh, updating, the owner API and troubleshooting |
+| [`docs/sources.md`](docs/sources.md) | The seeded sources and the live audit of them |
+| [`docs/xiaohongshu.md`](docs/xiaohongshu.md), [`docs/x.md`](docs/x.md) | How each platform is read and how to renew its cookie |
 
 ## Limitations
 
