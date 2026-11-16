@@ -49,6 +49,8 @@ services:
     <<: *aid
     command: ["sh", "deploy/scheduler.sh"]
     restart: unless-stopped
+    # Long enough for a stopped run to record itself as cancelled and release its lease.
+    stop_grace_period: 30s
 
   aid:
     <<: *aid

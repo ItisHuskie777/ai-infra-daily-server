@@ -2,9 +2,11 @@ import asyncio
 import sqlite3
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import AsyncGenerator
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import override
 
@@ -98,21 +100,15 @@ class SqliteDatabase(ImplementsDatabase):
 
     @override
     async def execute(self, sql: str, params: Params = ()) -> int:
-        connection = await self._connected()
-
-        async with self._lock:
+        async with self._write() as connection:
             cursor = await connection.execute(sql, tuple(params))
-            await connection.commit()
 
         return cursor.rowcount
 
     @override
     async def execute_many(self, sql: str, rows: Iterable[Params]) -> None:
-        connection = await self._connected()
-
-        async with self._lock:
+        async with self._write() as connection:
             await connection.executemany(sql, [tuple(row) for row in rows])
-            await connection.commit()
 
     @override
     async def fetch_one(self, sql: str, params: Params = ()) -> Row | None:
@@ -134,20 +130,11 @@ class SqliteDatabase(ImplementsDatabase):
 
     @override
     async def transaction(self, statements: Sequence[tuple[str, Params]]) -> None:
-        connection = await self._connected()
-
-        async with self._lock:
+        async with self._write() as connection:
             await connection.execute("BEGIN IMMEDIATE")
 
-            try:
-                for sql, params in statements:
-                    await connection.execute(sql, tuple(params))
-            except Exception:
-                await connection.rollback()
-
-                raise
-
-            await connection.commit()
+            for sql, params in statements:
+                await connection.execute(sql, tuple(params))
 
     @override
     async def migrate(self, directory: Path) -> OnSuccess[list[str]]:
@@ -186,6 +173,25 @@ class SqliteDatabase(ImplementsDatabase):
         async with self._lock:
             await connection.execute("VACUUM INTO ?", (str(path),))
 
+    @asynccontextmanager
+    async def _write(self) -> AsyncGenerator[aiosqlite.Connection]:
+        """One write under the lock: committed when the block completes, rolled back
+        when it fails or is cancelled. A failed statement would otherwise leave its
+        transaction open, blocking other processes until the next unrelated write
+        committed whatever it had half done."""
+        connection = await self._connected()
+
+        async with self._lock:
+            committed = False
+
+            try:
+                yield connection
+                await connection.commit()
+                committed = True
+            finally:
+                if not committed:
+                    await connection.rollback()
+
     async def _connected(self) -> aiosqlite.Connection:
         if self._connection is None:
             await self.connect()
@@ -199,13 +205,16 @@ def _to_mapping(row: sqlite3.Row) -> Row:
     return {key: row[key] for key in row.keys()}  # noqa: SIM118
 
 
-def default() -> ImplementsDatabase:
-    return SqliteDatabase(settings.DATABASE_PATH)
+def _has_sql(text: str) -> bool:
+    lines = (line.strip() for line in text.splitlines())
+
+    return any(line != "" and not line.startswith("--") for line in lines)
 
 
-def _statements(script: str) -> list[str]:
+def _statements(script: str) -> OnSuccess[list[str]]:
     """Splits a migration file into complete statements, so they can run inside one
-    transaction; `executescript` would commit before starting."""
+    transaction; `executescript` would commit before starting. SQL left over after the
+    last `;` is an error, not something to skip and record as applied."""
     statements: list[str] = []
     buffer = ""
 
@@ -216,6 +225,9 @@ def _statements(script: str) -> list[str]:
             statements.append(buffer.strip())
             buffer = ""
 
+    if _has_sql(buffer):
+        return DatabaseError.MIGRATION_FAILED
+
     return [statement for statement in statements if statement != ""]
 
 
@@ -225,6 +237,16 @@ async def _apply_migration(
     """Checks and records the migration inside an immediate transaction, so a second
     process waits and then finds it recorded; a failing statement rolls the whole
     file back."""
+    statements = _statements(script)
+
+    if is_error(statements):
+        logger.error(
+            "Database migration has an unterminated statement.",
+            extra={"migration": name},
+        )
+
+        return statements
+
     await connection.execute("BEGIN IMMEDIATE")
 
     async with connection.execute(
@@ -238,7 +260,7 @@ async def _apply_migration(
         return False
 
     try:
-        for statement in _statements(script):
+        for statement in statements:
             await connection.execute(statement)
 
         await connection.execute(
@@ -253,3 +275,7 @@ async def _apply_migration(
     await connection.commit()
 
     return True
+
+
+def default() -> ImplementsDatabase:
+    return SqliteDatabase(settings.DATABASE_PATH)

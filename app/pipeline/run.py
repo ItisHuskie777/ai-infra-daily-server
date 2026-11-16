@@ -11,7 +11,6 @@ from app.context import AbstractContext
 from app.models import DeliveryStatus
 from app.models import Digest
 from app.models import DigestEventPlacement
-from app.models import DigestSection
 from app.models import Interests
 from app.models import Model
 from app.models import Profile
@@ -29,15 +28,12 @@ from app.pipeline import schedule
 from app.pipeline import select
 from app.pipeline import summarise
 from app.pipeline import threads
-from app.pipeline.compose import ComposedEvent
-from app.pipeline.compose import ComposedSection
-from app.pipeline.summarise import EventSummary
-from app.result import OnSuccess
+from app.pipeline.summarise import SummarisedEvent
 from app.result import ServiceError
 from app.result import is_error
+from app.sources import ImplementsSourceAdapter
 from app.sources import fetch_all
 from app.sources import seeds
-from app.sources._common import ImplementsSourceAdapter
 
 logger = logging.get_logger(__name__)
 
@@ -46,7 +42,6 @@ type Adapters = Mapping[str, ImplementsSourceAdapter]
 
 
 class RunError(ServiceError):
-    RANKING_FAILED = "ranking_failed"
     ALL_SUMMARIES_FAILED = "all_summaries_failed"
 
     @override
@@ -124,7 +119,7 @@ async def _rank_and_select(
     now: datetime,
     profile: Profile,
     interests: Interests,
-) -> OnSuccess[list[DigestEventPlacement]]:
+) -> list[DigestEventPlacement]:
     await ctx.runs.set_stage(run_id, "rank")
     since = now - timedelta(hours=settings.EVENT_WINDOW_HOURS)
     events = await ctx.events.list_updated_since(since)
@@ -138,15 +133,8 @@ async def _rank_and_select(
     ranked = await rank.rank_events(
         ctx, interests, sources, select.fresh_events(events, already_sent, sent_keys)
     )
-
-    if is_error(ranked):
-        logger.error("Ranking failed.", extra={"error": str(ranked)})
-
-        return RunError.RANKING_FAILED
-
     await ctx.runs.set_stage(run_id, "select")
     pinned = await ctx.threads.list_pinned(since=threads.inactive_since(now))
-
     selected = select.select_for_digest(
         ranked,
         style=profile.digest_style,
@@ -160,57 +148,13 @@ async def _rank_and_select(
     return select.trim_to_budget(reviewed, style=profile.digest_style)
 
 
-async def _summarise_all(
-    ctx: AbstractContext,
-    placements: Sequence[DigestEventPlacement],
-    *,
-    profile: Profile,
-    interests: Interests,
-) -> list[ComposedSection]:
-    buckets: dict[DigestSection, list[ComposedEvent]] = {}
-    semaphore = asyncio.Semaphore(settings.SUMMARY_CONCURRENCY)
-
-    async def summarised(placement: DigestEventPlacement) -> OnSuccess[EventSummary]:
-        async with semaphore:
-            return await summarise.summarise_event(
-                ctx,
-                placement,
-                style=profile.digest_style,
-                depth=interests.technical_depth,
-            )
-
-    summaries = await asyncio.gather(*(summarised(entry) for entry in placements))
-
-    for placement, summary in zip(placements, summaries, strict=True):
-        if is_error(summary):
-            logger.warning(
-                "Event summary failed; event skipped.",
-                extra={"event_id": placement.event.id, "error": str(summary)},
-            )
-
-            continue
-
-        buckets.setdefault(placement.section, []).append(
-            ComposedEvent(
-                placement=placement, summary=summary, thread=placement.event.thread
-            )
-        )
-
-    return [
-        ComposedSection(section=section, events=tuple(buckets[section]))
-        for section in DigestSection
-        if section in buckets
-    ]
-
-
 def _build_digest(
     *,
     digest_id: str,
     date: str,
     now: datetime,
     profile: Profile,
-    placements: Sequence[DigestEventPlacement],
-    sections: Sequence[ComposedSection],
+    events: Sequence[SummarisedEvent],
     health: Sequence[SourceHealth],
 ) -> Digest:
     expires_at = now + timedelta(days=settings.FEEDBACK_TOKEN_DAYS)
@@ -225,11 +169,11 @@ def _build_digest(
 
     composed = compose.compose_digest_html(
         date=date,
-        sections=sections,
+        events=events,
         health=health,
         feedback_base_url=settings.PUBLIC_BASE_URL,
         sign_link=sign_link,
-        quizzes=quiz.build_quizzes(placements, date=date),
+        quizzes=quiz.build_quizzes([event.placement for event in events], date=date),
     )
 
     return Digest(
@@ -238,7 +182,6 @@ def _build_digest(
         style=profile.digest_style,
         subject=composed.subject,
         html=composed.html,
-        placements=tuple(placements),
         health=tuple(health),
         delivery_status=DeliveryStatus.PENDING,
         delivery_error=None,
@@ -247,23 +190,8 @@ def _build_digest(
 
 
 async def _deliver(
-    ctx: AbstractContext,
-    digest: Digest,
-    *,
-    now: datetime,
-    profile: Profile,
-    dry_run: bool,
+    ctx: AbstractContext, digest: Digest, profile: Profile
 ) -> RunOutcome:
-    if dry_run:
-        logger.info("Dry run: digest built, not sent.", extra={"digest_id": digest.id})
-
-        return RunOutcome(
-            status=RunStatus.DRY_RUN,
-            digest_id=None,
-            reason="dry run",
-            preview_html=digest.html,
-        )
-
     sent = await ctx.email.send(
         to=profile.email,
         subject=digest.subject,
@@ -280,7 +208,6 @@ async def _deliver(
         return _failed(sent, digest.id)
 
     await ctx.digests.set_delivery_status(digest.id, DeliveryStatus.SENT, None)
-    await ctx.preferences.set_last_digest_date(digest.date, now=now)
     logger.info("Digest sent.", extra={"digest_id": digest.id, "message_id": sent})
 
     return RunOutcome(status=RunStatus.SENT, digest_id=digest.id, reason="sent")
@@ -303,56 +230,65 @@ async def _stages(
         ctx, run_id, now=now, profile=profile, interests=interests
     )
 
-    if is_error(placements):
-        return _failed(placements)
-
     if len(placements) == 0:
         return _skipped("nothing new to send")
 
     await ctx.runs.set_stage(run_id, "summarise")
-    sections = await _summarise_all(
-        ctx, placements, profile=profile, interests=interests
+    events = await summarise.summarise_events(
+        ctx,
+        placements,
+        style=profile.digest_style,
+        depth=interests.technical_depth,
     )
 
-    if len(sections) == 0:
+    if len(events) == 0:
         return _failed(RunError.ALL_SUMMARIES_FAILED)
 
     await ctx.runs.set_stage(run_id, "compose")
-    # NOTE: Only summarised events are recorded, so an event whose summary failed is
-    # not counted as sent and can appear tomorrow.
     digest = _build_digest(
         digest_id=ctx.ids.new(),
         date=date,
         now=now,
         profile=profile,
-        placements=[
-            event.placement for section in sections for event in section.events
-        ],
-        sections=sections,
+        events=events,
         health=health,
     )
+
     # NOTE: A dry run leaves no digest behind, so previews never mix with real mail.
-    if not dry_run:
-        await ctx.runs.set_stage(run_id, "persist")
-        await ctx.digests.save(digest)
+    if dry_run:
+        logger.info("Dry run: digest built, not sent.", extra={"digest_id": digest.id})
+
+        return RunOutcome(
+            status=RunStatus.DRY_RUN,
+            digest_id=None,
+            reason="dry run",
+            preview_html=digest.html,
+        )
+
+    await ctx.runs.set_stage(run_id, "persist")
+    # NOTE: Only summarised events are recorded, so an event whose summary failed is
+    # not counted as sent and can appear tomorrow.
+    await ctx.digests.save(digest, [event.placement for event in events])
     await ctx.runs.set_stage(run_id, "deliver")
 
-    return await _deliver(ctx, digest, now=now, profile=profile, dry_run=dry_run)
+    return await _deliver(ctx, digest, profile)
 
 
-async def _resend_failed(
-    ctx: AbstractContext, *, date: str, now: datetime, profile: Profile
+async def _resend_undelivered(
+    ctx: AbstractContext, *, date: str, profile: Profile
 ) -> RunOutcome | None:
-    """A digest built today whose delivery failed is sent again as it is, without
-    spending another run of the model on it."""
+    """A digest built today that did not go out is sent again as it is, without
+    spending another run of the model on it. That covers a failed delivery and a run
+    killed between storing the digest and recording the send; the digest id is the
+    email's idempotency key, so a send that did get through is not repeated."""
     existing = await ctx.digests.find_by_date(date)
 
-    if is_error(existing) or existing.delivery_status != DeliveryStatus.FAILED:
+    if is_error(existing) or existing.delivery_status is DeliveryStatus.SENT:
         return None
 
     logger.info("Resending today's undelivered digest.", extra={"digest": existing.id})
 
-    return await _deliver(ctx, existing, now=now, profile=profile, dry_run=False)
+    return await _deliver(ctx, existing, profile)
 
 
 async def _decide(
@@ -397,8 +333,8 @@ async def _attempt(
     adapters: Adapters,
 ) -> RunOutcome:
     if not dry_run:
-        resent = await _resend_failed(
-            ctx, date=decision.local_date, now=now, profile=profile
+        resent = await _resend_undelivered(
+            ctx, date=decision.local_date, profile=profile
         )
 
         if resent is not None:
@@ -467,10 +403,13 @@ async def _run_holding_lease(
 
         raise
 
+    # NOTE: A failed preview is recorded as a dry run, so trying things out never uses
+    # up the day's delivery attempts.
+    recorded = RunStatus.DRY_RUN if dry_run and finished.failed else finished.status
     await ctx.runs.finish(
         run_id,
         now=ctx.clock.now(),
-        outcome=finished.status,
+        outcome=recorded,
         detail=finished.reason,
         digest_id=finished.digest_id,
     )

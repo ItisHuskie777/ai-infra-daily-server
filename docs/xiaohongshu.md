@@ -23,9 +23,9 @@ libraries, which needs root).
 
 For each run:
 
-1. The feed page is rendered with the session cookies and scrolled three times. `precheck`
-   returns `not_configured` first when there is no browser, no cookie, or mode `user` without a
-   `user_id`, so the fetch is never attempted.
+1. The feed page is rendered with the session cookies and scrolled three times. `fetch`
+   returns `not_configured` before rendering when there is no browser, no cookie, or mode
+   `user` without a `user_id`.
 2. An extract script (a JavaScript expression evaluated in the page) reads note cards from
    `window.__INITIAL_STATE__` (`feed.feeds` or `user.notes`), falling back to the rendered
    `section.note-item` cards. The returned list is validated with a Pydantic `TypeAdapter`.
@@ -43,8 +43,8 @@ For each run:
 ## Obtaining the cookie
 
 The adapter needs the raw `Cookie` request header of a logged-in browser session, stored as
-`XIAOHONGSHU_COOKIE` in `.env` and exposed to the code as `ctx.xiaohongshu_cookie`. An empty value
-means the source is off.
+`XIAOHONGSHU_COOKIE` in `.env` and handed to `XiaohongshuAdapter` when `app/sources/registry.py`
+builds it. An empty value means the source is off.
 
 1. Log in at `https://www.xiaohongshu.com` in a desktop browser (scan the QR code with the app).
 2. Open the developer tools, Network tab, and reload the page.

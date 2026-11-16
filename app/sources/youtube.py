@@ -31,13 +31,6 @@ class YoutubeAdapter(ImplementsSourceAdapter):
         return "youtube"
 
     @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        if not isinstance(source.config, YoutubeConfig):
-            return FetchError.UNSUPPORTED
-
-        return None
-
-    @override
     async def fetch(
         self, ctx: AbstractContext, source: Source
     ) -> OnSuccess[list[SourceItem]]:

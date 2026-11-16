@@ -3,14 +3,14 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from app import settings
-from app.adapters.embeddings import Vector
-from app.adapters.embeddings import cosine_similarity
 from app.models import EventWithItems
 from app.models import Interests
 from app.models import Model
 from app.models import RankedEvent
 from app.models import Source
 from app.models import Topic
+from app.vectors import Vector
+from app.vectors import cosine_similarity
 
 _NEUTRAL_WEIGHT = 1.0
 _SECONDS_PER_HOUR = 3600.0

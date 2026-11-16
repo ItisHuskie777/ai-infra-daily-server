@@ -223,7 +223,6 @@ class SourceItem(Model):
 
 class StoredItem(SourceItem):
     first_seen_at: datetime
-    embedded: bool
     event_id: str | None
 
 
@@ -231,7 +230,6 @@ class Event(Model):
     id: str
     thread_id: str | None
     title: str
-    summary: str
     created_at: datetime
     updated_at: datetime
     centroid_item_id: str | None
@@ -289,7 +287,6 @@ class Digest(Model):
     style: DigestStyle
     subject: str
     html: str
-    placements: tuple[DigestEventPlacement, ...]
     health: tuple[SourceHealth, ...]
     delivery_status: DeliveryStatus
     delivery_error: str | None
@@ -310,7 +307,6 @@ class Profile(Model):
     timezone: str
     delivery_hour: int = Field(ge=0, le=23)
     digest_style: DigestStyle
-    last_digest_date: str | None
 
 
 class Interests(Model):

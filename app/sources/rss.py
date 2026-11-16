@@ -128,13 +128,6 @@ class RssAdapter(ImplementsSourceAdapter):
         return "rss"
 
     @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        if not isinstance(source.config, RssConfig):
-            return FetchError.UNSUPPORTED
-
-        return None
-
-    @override
     async def fetch(
         self, ctx: AbstractContext, source: Source
     ) -> OnSuccess[list[SourceItem]]:

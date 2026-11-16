@@ -157,15 +157,6 @@ class HackerNewsAdapter(ImplementsSourceAdapter):
         return "hn"
 
     @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        if not isinstance(source.config, HackerNewsConfig):
-            return FetchError.UNSUPPORTED
-
-        url = _search_url(source.config)
-
-        return url if isinstance(url, FetchError) else None
-
-    @override
     async def fetch(
         self, ctx: AbstractContext, source: Source
     ) -> OnSuccess[list[SourceItem]]:

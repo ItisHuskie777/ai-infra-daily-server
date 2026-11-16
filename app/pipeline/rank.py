@@ -9,7 +9,6 @@ from pydantic import Field
 
 from app import logging
 from app import settings
-from app.adapters.embeddings import Vector
 from app.context import AbstractContext
 from app.models import EventScore
 from app.models import EventWithItems
@@ -19,11 +18,11 @@ from app.models import Source
 from app.models import SourceCategory
 from app.models import Thread
 from app.models import Topic
+from app.pipeline import _items
 from app.pipeline import _untrusted
 from app.pipeline import recommend
-from app.pipeline.select import engagement_value
-from app.result import OnSuccess
 from app.result import is_error
+from app.vectors import Vector
 
 logger = logging.get_logger(__name__)
 
@@ -31,7 +30,6 @@ _TOPIC_LINES = tuple(recommend.TOPIC_DESCRIPTIONS.items())
 
 _RANK_BATCH_SIZE = 15
 _ITEMS_PER_EVENT_IN_PROMPT = 5
-_SUMMARY_LIMIT = 600
 _RANK_SYSTEM_PROMPT = (
     "You rank AI-news events for one reader. Score how much each event matches the "
     "reader's interest profile, from 0 (irrelevant) to 1 (must read), and give a "
@@ -117,10 +115,7 @@ def _describe_list(label: str, values: Sequence[str]) -> str:
 
 
 def _describe_event(event: EventWithItems, sources: Mapping[str, Source]) -> str:
-    lines = [
-        f"Event {event.id}: {_untrusted.fence(event.title)}",
-        f"  Summary: {_untrusted.fence(event.summary[:_SUMMARY_LIMIT])}",
-    ]
+    lines = [f"Event {event.id}: {_untrusted.fence(event.title)}"]
 
     for item in event.items[:_ITEMS_PER_EVENT_IN_PROMPT]:
         source = sources[item.source_id].name if item.source_id in sources else None
@@ -185,9 +180,7 @@ def _count_matches(text: str, keywords: Sequence[str]) -> int:
 
 def _heuristic_score(event: EventWithItems, interests: Interests) -> _Score:
     """Keyword and engagement based stand-in for when the model is unavailable."""
-    text = "\n".join(
-        [event.title, event.summary, *(item.title for item in event.items)]
-    ).lower()
+    text = "\n".join([event.title, *(item.title for item in event.items)]).lower()
 
     matches = _count_matches(text, [*interests.topics, *interests.keywords_include])
     excluded = _count_matches(text, interests.keywords_exclude)
@@ -198,7 +191,7 @@ def _heuristic_score(event: EventWithItems, interests: Interests) -> _Score:
         for item in event.items
     )
 
-    engagement = sum(engagement_value(item) for item in event.items)
+    engagement = sum(_items.engagement_value(item) for item in event.items)
 
     relevance = (
         _HEURISTIC_BASE
@@ -418,7 +411,7 @@ async def rank_events(
     interests: Interests,
     sources: Sequence[Source],
     events: Sequence[EventWithItems],
-) -> OnSuccess[list[RankedEvent]]:
+) -> list[RankedEvent]:
     """Scores events against the interest profile in model batches, turns each score
     into a recommendation score (source weight, topic taste, coverage, freshness,
     substance), holds back repeats of a story already ranked higher and drops events

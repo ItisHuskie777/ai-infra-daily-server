@@ -1,4 +1,3 @@
-import re
 from collections.abc import Sequence
 from typing import Literal
 from typing import override
@@ -15,90 +14,14 @@ from app.models import Interests
 from app.models import Model
 from app.models import Thread
 from app.models import Topic
+from app.pipeline import _keywords
 from app.pipeline import recommend
+from app.pipeline import threads
 from app.result import OnSuccess
 from app.result import ServiceError
 from app.result import is_error
 
 logger = logging.get_logger(__name__)
-
-_MAX_KEYWORDS_PER_FEEDBACK = 3
-_MIN_KEYWORD_LENGTH = 4
-_TOKEN_SEPARATOR = re.compile(r"[\W_]+")
-_STOPWORDS = frozenset(
-    {
-        "about",
-        "after",
-        "again",
-        "against",
-        "also",
-        "announces",
-        "announced",
-        "because",
-        "been",
-        "before",
-        "being",
-        "between",
-        "could",
-        "does",
-        "down",
-        "during",
-        "each",
-        "from",
-        "have",
-        "here",
-        "into",
-        "introduces",
-        "just",
-        "launches",
-        "launched",
-        "like",
-        "made",
-        "make",
-        "more",
-        "most",
-        "much",
-        "only",
-        "other",
-        "over",
-        "releases",
-        "released",
-        "report",
-        "said",
-        "says",
-        "should",
-        "some",
-        "still",
-        "such",
-        "than",
-        "that",
-        "their",
-        "them",
-        "then",
-        "there",
-        "these",
-        "they",
-        "this",
-        "those",
-        "through",
-        "today",
-        "under",
-        "unveils",
-        "using",
-        "very",
-        "were",
-        "what",
-        "when",
-        "where",
-        "which",
-        "while",
-        "will",
-        "with",
-        "without",
-        "would",
-        "your",
-    }
-)
 
 type _Direction = Literal["more", "less"]
 
@@ -122,28 +45,6 @@ class _Targets(Model):
     source_ids: tuple[str, ...]
     title: str | None
     topics: tuple[Topic, ...] = ()
-
-
-def extract_keywords(title: str, existing: Sequence[str]) -> list[str]:
-    known = {keyword.lower() for keyword in existing}
-    keywords: list[str] = []
-
-    for token in _TOKEN_SEPARATOR.split(title.lower()):
-        if len(token) < _MIN_KEYWORD_LENGTH or token in _STOPWORDS or token in known:
-            continue
-
-        known.add(token)
-        keywords.append(token)
-
-        if len(keywords) == _MAX_KEYWORDS_PER_FEEDBACK:
-            break
-
-    return keywords
-
-
-def pinned_query_for(title: str) -> str:
-    """The few distinctive words of a thread's title; later events match on them."""
-    return " ".join(extract_keywords(title, ()))
 
 
 def _clamp_weight(weight: float) -> float:
@@ -231,7 +132,7 @@ def _with_preference(
     interests: Interests, title: str | None, direction: _Direction
 ) -> Interests:
     if direction == "more":
-        include = extract_keywords(title or "", interests.keywords_include)
+        include = _keywords.extract_keywords(title or "", interests.keywords_include)
 
         return interests.model_copy(
             update={
@@ -242,7 +143,7 @@ def _with_preference(
             }
         )
 
-    exclude = extract_keywords(title or "", interests.keywords_exclude)
+    exclude = _keywords.extract_keywords(title or "", interests.keywords_exclude)
 
     return interests.model_copy(
         update={
@@ -340,14 +241,8 @@ async def _pin_thread(
     if is_error(thread):
         return thread
 
-    pinned = await ctx.threads.set_pinned(
-        thread.id, pinned=True, query=pinned_query_for(thread.title)
-    )
-
-    if is_error(pinned):
+    if is_error(await threads.set_pinned(ctx, thread.id, pinned=True)):
         return FeedbackError.NOT_FOUND
-
-    logger.info("Thread pinned.", extra={"thread_id": thread.id})
 
     return FeedbackOutcome(interests=interests, source_weight_changes=())
 

@@ -11,7 +11,6 @@ from app.adapters.database import Row
 from app.models import Model
 from app.models import Source
 from app.models import SourceConfig
-from app.models import SourceHealth
 from app.repositories._common import StoreError
 from app.repositories._common import to_iso
 from app.result import OnSuccess
@@ -40,11 +39,10 @@ class ImplementsSourceRepository(ABC):
     async def find_by_id(self, source_id: str) -> OnSuccess[Source]: ...
 
     @abstractmethod
-    async def upsert(self, source: Source, *, now: datetime) -> None: ...
-
-    @abstractmethod
-    async def insert_missing(self, sources: Sequence[Source], *, now: datetime) -> int:
-        """Seeds sources that do not exist yet without touching the owner's edits."""
+    async def seed(self, sources: Sequence[Source], *, now: datetime) -> int:
+        """Inserts the sources that do not exist yet and returns how many. Existing rows
+        take the seed's name, category, language and config, while `enabled` and
+        `weight`, the two fields the owner edits, are left as they are."""
 
     @abstractmethod
     async def set_enabled(
@@ -58,10 +56,6 @@ class ImplementsSourceRepository(ABC):
 
     @abstractmethod
     async def record_run(self, run: SourceRun) -> None: ...
-
-    @abstractmethod
-    async def latest_health(self) -> list[SourceHealth]:
-        """The most recent run of every enabled source, for the digest footer."""
 
 
 class SourceRepository(ImplementsSourceRepository):
@@ -96,58 +90,39 @@ class SourceRepository(ImplementsSourceRepository):
         return _to_source(row)
 
     @override
-    async def upsert(self, source: Source, *, now: datetime) -> None:
-        await self._db.execute(
+    async def seed(self, sources: Sequence[Source], *, now: datetime) -> int:
+        existing = {
+            str(row["id"]) for row in await self._db.fetch_all("SELECT id FROM sources")
+        }
+        await self._db.execute_many(
             "INSERT INTO sources (id, name, kind, category, language, enabled, weight, "
             "config_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind, "
             "category = excluded.category, language = excluded.language, "
-            "weight = excluded.weight, config_json = excluded.config_json, "
-            "updated_at = excluded.updated_at",
-            (
-                source.id,
-                source.name,
-                source.kind,
-                source.category,
-                source.language,
-                int(source.enabled),
-                source.weight,
-                source.config.model_dump_json(),
-                to_iso(now),
-                to_iso(now),
-            ),
+            "config_json = excluded.config_json, updated_at = excluded.updated_at "
+            "WHERE sources.name IS NOT excluded.name "
+            "OR sources.kind IS NOT excluded.kind "
+            "OR sources.category IS NOT excluded.category "
+            "OR sources.language IS NOT excluded.language "
+            "OR sources.config_json IS NOT excluded.config_json",
+            [
+                (
+                    source.id,
+                    source.name,
+                    source.kind,
+                    source.category,
+                    source.language,
+                    int(source.enabled),
+                    source.weight,
+                    source.config.model_dump_json(),
+                    to_iso(now),
+                    to_iso(now),
+                )
+                for source in sources
+            ],
         )
 
-    @override
-    async def insert_missing(self, sources: Sequence[Source], *, now: datetime) -> int:
-        existing = {
-            str(row["id"]) for row in await self._db.fetch_all("SELECT id FROM sources")
-        }
-        new = [source for source in sources if source.id not in existing]
-
-        if new:
-            await self._db.execute_many(
-                "INSERT INTO sources (id, name, kind, category, language, enabled, "
-                "weight, config_json, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                [
-                    (
-                        source.id,
-                        source.name,
-                        source.kind,
-                        source.category,
-                        source.language,
-                        int(source.enabled),
-                        source.weight,
-                        source.config.model_dump_json(),
-                        to_iso(now),
-                        to_iso(now),
-                    )
-                    for source in new
-                ],
-            )
-
-        return len(new)
+        return sum(source.id not in existing for source in sources)
 
     @override
     async def set_enabled(
@@ -196,28 +171,6 @@ class SourceRepository(ImplementsSourceRepository):
                 run.item_count,
             ),
         )
-
-    @override
-    async def latest_health(self) -> list[SourceHealth]:
-        rows = await self._db.fetch_all(
-            "SELECT s.id AS source_id, s.name, r.ok, r.error, r.item_count "
-            "FROM sources s JOIN source_runs r ON r.source_id = s.id "
-            "WHERE s.enabled = 1 AND r.id = ("
-            "  SELECT id FROM source_runs WHERE source_id = s.id "
-            "  ORDER BY started_at DESC LIMIT 1) "
-            "ORDER BY s.id"
-        )
-
-        return [
-            SourceHealth(
-                source_id=str(row["source_id"]),
-                name=str(row["name"]),
-                ok=bool(row["ok"]),
-                error=None if row["error"] is None else str(row["error"]),
-                item_count=int(str(row["item_count"])),
-            )
-            for row in rows
-        ]
 
 
 def _to_source(row: Row) -> Source:

@@ -8,12 +8,11 @@ import numpy
 from fastembed import TextEmbedding
 from fastembed.common.model_description import ModelSource
 from fastembed.common.model_description import PoolingType
-from numpy.typing import NDArray
 
 from app import logging
 from app import settings
-
-type Vector = NDArray[numpy.float32]
+from app import vectors
+from app.vectors import Vector
 
 logger = logging.get_logger(__name__)
 
@@ -28,6 +27,11 @@ class ImplementsEmbeddings(ABC):
     @abstractmethod
     async def embed(self, texts: Sequence[str]) -> list[Vector]:
         """One unit-length float32 vector per text, in order."""
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Drops the loaded model, which holds about 3 GB; the next `embed` loads it
+        again."""
 
 
 class FastembedEmbeddings(ImplementsEmbeddings):
@@ -45,13 +49,19 @@ class FastembedEmbeddings(ImplementsEmbeddings):
 
         model = await self._loaded()
         # NOTE: ONNX inference is CPU-bound and synchronous, so it runs in a thread.
-        vectors = await asyncio.to_thread(
+        embedded = await asyncio.to_thread(
             lambda: list(model.embed(list(texts), batch_size=_INFERENCE_BATCH_SIZE))
         )
 
         return [
-            normalise(numpy.asarray(vector, dtype=numpy.float32)) for vector in vectors
+            vectors.normalise(numpy.asarray(vector, dtype=numpy.float32))
+            for vector in embedded
         ]
+
+    @override
+    async def close(self) -> None:
+        async with self._lock:
+            self._model = None
 
     async def _loaded(self) -> TextEmbedding:
         async with self._lock:
@@ -81,20 +91,6 @@ def _load(model_name: str) -> TextEmbedding:
         )
 
     return TextEmbedding(model_name=model_name)
-
-
-def normalise(vector: Vector) -> Vector:
-    norm = float(numpy.linalg.norm(vector))
-
-    if norm == 0.0:
-        return vector
-
-    return (vector / norm).astype(numpy.float32)
-
-
-def cosine_similarity(left: Vector, right: Vector) -> float:
-    """Both inputs are expected to be unit length, as `embed` returns them."""
-    return float(numpy.dot(left, right))
 
 
 def default() -> ImplementsEmbeddings:

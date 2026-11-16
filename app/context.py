@@ -77,14 +77,6 @@ class AbstractContext(ABC):
 
     @property
     @abstractmethod
-    def xiaohongshu_cookie(self) -> str: ...
-
-    @property
-    @abstractmethod
-    def x_cookie(self) -> str: ...
-
-    @property
-    @abstractmethod
     def sources(self) -> ImplementsSourceRepository: ...
 
     @property
@@ -145,8 +137,6 @@ class Context(AbstractContext):
         clock: ImplementsClock,
         database: ImplementsDatabase,
         ids: ImplementsIds,
-        xiaohongshu_cookie: str,
-        x_cookie: str,
     ) -> None:
         self._http = http
         self._llm = llm
@@ -156,8 +146,6 @@ class Context(AbstractContext):
         self._clock = clock
         self._database = database
         self._ids = ids
-        self._xiaohongshu_cookie = xiaohongshu_cookie
-        self._x_cookie = x_cookie
         self._repositories = Repositories(database)
 
     @property
@@ -202,16 +190,6 @@ class Context(AbstractContext):
 
     @property
     @override
-    def xiaohongshu_cookie(self) -> str:
-        return self._xiaohongshu_cookie
-
-    @property
-    @override
-    def x_cookie(self) -> str:
-        return self._x_cookie
-
-    @property
-    @override
     def sources(self) -> ImplementsSourceRepository:
         return self._repositories.sources
 
@@ -250,6 +228,7 @@ class Context(AbstractContext):
         if self._browser is not None:
             await self._browser.close()
 
+        await self._embeddings.close()
         await self._http.close()
         await self._database.close()
 
@@ -267,6 +246,4 @@ def default() -> Context:
         clock=clock.default(),
         database=database.default(),
         ids=ids.default(),
-        xiaohongshu_cookie=settings.XIAOHONGSHU_COOKIE,
-        x_cookie=settings.X_COOKIE,
     )

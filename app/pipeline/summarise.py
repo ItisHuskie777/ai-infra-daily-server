@@ -1,7 +1,9 @@
+import asyncio
 import re
 from collections.abc import Sequence
 from typing import override
 
+from pydantic import BaseModel
 from pydantic import Field
 
 from app import logging
@@ -15,6 +17,7 @@ from app.models import Language
 from app.models import Model
 from app.models import StoredItem
 from app.models import TechnicalDepth
+from app.pipeline import _items
 from app.pipeline import _style
 from app.pipeline import _untrusted
 from app.result import OnSuccess
@@ -55,12 +58,6 @@ _MAX_TAKES: dict[TechnicalDepth, int] = {
     TechnicalDepth.PRACTICAL: 4,
     TechnicalDepth.DEEP: 5,
 }
-_ITEM_KIND_ORDER: dict[ItemKind, int] = {
-    ItemKind.PRIMARY: 0,
-    ItemKind.MEDIA: 1,
-    ItemKind.COMMENTARY: 2,
-    ItemKind.DISCUSSION: 3,
-}
 _DEPTH_GUIDANCE: dict[TechnicalDepth, str] = {
     TechnicalDepth.HIGH_LEVEL: (
         "Write for a busy reader: outcomes and implications, no implementation detail."
@@ -99,23 +96,31 @@ class EventSummary(Model):
     language: Language
 
 
+class SummarisedEvent(Model):
+    placement: DigestEventPlacement
+    summary: EventSummary
+
+
 class _QuoteSource(Model):
     text: str
     author: str | None
     url: str
 
 
-class _ModelTake(Model):
-    quote: str = Field(min_length=1)
-    author: str = Field(min_length=1)
-    stance: str = Field(min_length=1)
+# NOTE: The reply models are lenient on purpose, like the ranker's: an extra key, a
+# take without an author or an over-long title is tidied in code below instead of
+# rejecting the whole summary and dropping the event from the digest.
+class _ModelTake(BaseModel):
+    quote: str = ""
+    author: str | None = None
+    stance: str = ""
 
 
-class _ModelSummary(Model):
-    title: str = Field(min_length=1, max_length=_MAX_TITLE_LENGTH)
+class _ModelSummary(BaseModel):
+    title: str = Field(min_length=1)
     summary: str = Field(min_length=1)
-    key_claims: tuple[str, ...]
-    takes: tuple[_ModelTake, ...]
+    key_claims: list[str] = Field(default_factory=list)
+    takes: list[_ModelTake] = Field(default_factory=list)
 
 
 def _normalise_whitespace(text: str) -> str:
@@ -132,11 +137,9 @@ def _excerpt(text: str) -> str:
 
 
 def _select_items(placement: DigestEventPlacement) -> list[StoredItem]:
-    wanted = set(placement.item_ids)
-    selected = [item for item in placement.event.items if item.id in wanted]
-    items = selected if selected else list(placement.event.items)
-
-    return sorted(items, key=lambda item: _ITEM_KIND_ORDER[item.kind])
+    return sorted(
+        _items.chosen_items(placement), key=lambda item: _items.KIND_ORDER[item.kind]
+    )
 
 
 def _top_comments(item: StoredItem) -> list[Comment]:
@@ -206,14 +209,8 @@ def _build_prompt(
     style: DigestStyle,
     depth: TechnicalDepth,
 ) -> str:
-    coverage = [
-        item for item in items if item.kind in (ItemKind.PRIMARY, ItemKind.MEDIA)
-    ]
-    voices = [
-        item
-        for item in items
-        if item.kind in (ItemKind.COMMENTARY, ItemKind.DISCUSSION)
-    ]
+    coverage = [item for item in items if item.kind in _items.REPORT_KINDS]
+    voices = [item for item in items if item.kind not in _items.REPORT_KINDS]
     output_language = "Chinese (Simplified)" if language is Language.ZH else "English"
     coverage_text = "\n".join(_describe_item(item) for item in coverage) or "(none)"
     voices_text = "\n".join(_describe_item(item) for item in voices) or "(none)"
@@ -380,9 +377,42 @@ async def summarise_event(
     claims = [claim.strip() for claim in generated.key_claims if claim.strip() != ""]
 
     return EventSummary(
-        title=_style.tidy_headline(generated.title, language),
+        title=_style.tidy_headline(generated.title, language)[:_MAX_TITLE_LENGTH],
         summary=_cap_summary(_style.tidy(generated.summary, language), style),
         key_claims=tuple(claims[: _max_key_claims(style)]),
         takes=tuple(takes[: _max_takes(depth)]),
         language=language,
     )
+
+
+async def summarise_events(
+    ctx: AbstractContext,
+    placements: Sequence[DigestEventPlacement],
+    *,
+    style: DigestStyle,
+    depth: TechnicalDepth,
+) -> list[SummarisedEvent]:
+    """Summarises the placements side by side and keeps their order. An event whose
+    summary failed is left out, so it is not recorded as sent and can appear in the
+    next digest."""
+    semaphore = asyncio.Semaphore(settings.SUMMARY_CONCURRENCY)
+
+    async def summarised(placement: DigestEventPlacement) -> OnSuccess[EventSummary]:
+        async with semaphore:
+            return await summarise_event(ctx, placement, style=style, depth=depth)
+
+    summaries = await asyncio.gather(*(summarised(entry) for entry in placements))
+    events: list[SummarisedEvent] = []
+
+    for placement, summary in zip(placements, summaries, strict=True):
+        if is_error(summary):
+            logger.warning(
+                "Event summary failed; event skipped.",
+                extra={"event_id": placement.event.id, "error": str(summary)},
+            )
+
+            continue
+
+        events.append(SummarisedEvent(placement=placement, summary=summary))
+
+    return events

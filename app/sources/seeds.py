@@ -357,6 +357,7 @@ DEFAULT_SOURCES: tuple[Source, ...] = (
 
 
 async def seed_default_sources(ctx: AbstractContext) -> int:
-    """Inserts the seeds the database lacks; the owner's edits to existing rows are
-    never overwritten."""
-    return await ctx.sources.insert_missing(DEFAULT_SOURCES, now=ctx.clock.now())
+    """Inserts the seeds the database lacks and brings the others up to date with this
+    file, so a corrected feed address reaches a database seeded earlier. The owner's
+    `enabled` and `weight` are never overwritten."""
+    return await ctx.sources.seed(DEFAULT_SOURCES, now=ctx.clock.now())

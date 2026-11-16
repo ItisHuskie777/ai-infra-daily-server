@@ -14,6 +14,16 @@ from app.result import ServiceError
 logger = logging.get_logger(__name__)
 
 _JSON_ATTEMPTS = 2
+_MAX_PROBLEMS = 5
+
+
+def _problems(error: pydantic.ValidationError) -> str:
+    return "\n".join(
+        f"- {'.'.join(str(part) for part in issue['loc']) or 'reply'}: {issue['msg']}"
+        for issue in error.errors(include_url=False, include_input=False)[
+            :_MAX_PROBLEMS
+        ]
+    )
 
 
 class LlmError(ServiceError):
@@ -38,12 +48,8 @@ class ImplementsLlm(ABC):
         schema: type[M],
         temperature: float = 0.2,
     ) -> OnSuccess[M]:
-        """Validates the reply against `schema`; a malformed reply is retried once."""
-
-    @abstractmethod
-    async def complete_text(
-        self, *, system: str, user: str, temperature: float = 0.4
-    ) -> OnSuccess[str]: ...
+        """Validates the reply against `schema`; a malformed reply is retried once, with
+        the validation errors added to the request."""
 
 
 class OpenAiCompatibleLlm(ImplementsLlm):
@@ -68,38 +74,43 @@ class OpenAiCompatibleLlm(ImplementsLlm):
             f"JSON schema and nothing else:\n{schema_text}"
         )
 
+        request = user
+
         for attempt in range(_JSON_ATTEMPTS):
-            raw = await self._complete(instructions, user, temperature, json_mode=True)
+            raw = await self._complete(instructions, request, temperature)
 
             if isinstance(raw, LlmError):
                 return raw
 
             try:
                 return schema.model_validate_json(raw)
-            except pydantic.ValidationError:
+            except pydantic.ValidationError as error:
+                problems = _problems(error)
                 logger.warning(
                     "LLM reply did not match the schema.",
-                    extra={"attempt": attempt + 1, "schema": schema.__name__},
+                    extra={
+                        "attempt": attempt + 1,
+                        "schema": schema.__name__,
+                        "problems": problems,
+                    },
+                )
+                # NOTE: Most callers ask at temperature 0, so the same request would
+                # get the same wrong reply; the retry names what to fix.
+                request = (
+                    f"{user}\n\nYour previous reply was rejected for these reasons; "
+                    f"reply again with them fixed:\n{problems}"
                 )
 
         return LlmError.INVALID_RESPONSE
 
-    @override
-    async def complete_text(
-        self, *, system: str, user: str, temperature: float = 0.4
-    ) -> OnSuccess[str]:
-        return await self._complete(system, user, temperature, json_mode=False)
-
     async def _complete(
-        self, system: str, user: str, temperature: float, *, json_mode: bool
+        self, system: str, user: str, temperature: float
     ) -> OnSuccess[str]:
         try:
             completion = await self._client.chat.completions.create(
                 model=self._model,
                 temperature=temperature,
-                response_format={"type": "json_object"}
-                if json_mode
-                else {"type": "text"},
+                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -118,7 +129,21 @@ class OpenAiCompatibleLlm(ImplementsLlm):
 
             return LlmError.NETWORK
 
-        content = completion.choices[0].message.content if completion.choices else None
+        choice = completion.choices[0] if completion.choices else None
+        usage = completion.usage
+        logger.debug(
+            "LLM reply received.",
+            extra={
+                "finish_reason": None if choice is None else choice.finish_reason,
+                "prompt_tokens": None if usage is None else usage.prompt_tokens,
+                "completion_tokens": None if usage is None else usage.completion_tokens,
+            },
+        )
+
+        if choice is not None and choice.finish_reason == "length":
+            logger.warning("LLM reply was cut off at the token limit.")
+
+        content = None if choice is None else choice.message.content
 
         if content is None or content == "":
             return LlmError.INVALID_RESPONSE
@@ -141,12 +166,6 @@ class UnconfiguredLlm(ImplementsLlm):
         schema: type[M],
         temperature: float = 0.2,
     ) -> OnSuccess[M]:
-        return LlmError.NOT_CONFIGURED
-
-    @override
-    async def complete_text(
-        self, *, system: str, user: str, temperature: float = 0.4
-    ) -> OnSuccess[str]:
         return LlmError.NOT_CONFIGURED
 
 

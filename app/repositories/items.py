@@ -9,7 +9,6 @@ from pydantic import TypeAdapter
 
 from app.adapters.database import ImplementsDatabase
 from app.adapters.database import Row
-from app.adapters.embeddings import Vector
 from app.models import Comment
 from app.models import Engagement
 from app.models import SourceItem
@@ -19,12 +18,19 @@ from app.repositories._common import from_json
 from app.repositories._common import placeholders
 from app.repositories._common import to_iso
 from app.repositories._common import to_json
+from app.vectors import Vector
 
 _COMMENTS = TypeAdapter(tuple[Comment, ...])
 _ENGAGEMENT = TypeAdapter(Engagement)
 
 
 _QUERY_CHUNK = 500
+# Every column of a stored item except the vector, which is several kilobytes a row and
+# only wanted by the clustering queries that ask for it.
+_COLUMNS = (
+    "id, source_id, kind, url, canonical_url, title, author, language, published_at, "
+    "first_seen_at, text, engagement_json, comments_json, tags_json, event_id"
+)
 
 
 class EmbeddedItem:
@@ -146,7 +152,8 @@ class ItemRepository(ImplementsItemRepository):
             return []
 
         rows = await self._db.fetch_all(
-            f"SELECT * FROM items WHERE id IN ({placeholders(len(ids))})", list(ids)
+            f"SELECT {_COLUMNS} FROM items WHERE id IN ({placeholders(len(ids))})",
+            list(ids),
         )
         by_id = {str(row["id"]): to_stored_item(row) for row in rows}
 
@@ -155,7 +162,7 @@ class ItemRepository(ImplementsItemRepository):
     @override
     async def list_unembedded(self, *, limit: int) -> list[StoredItem]:
         rows = await self._db.fetch_all(
-            "SELECT * FROM items WHERE embedding IS NULL "
+            f"SELECT {_COLUMNS} FROM items WHERE embedding IS NULL "
             "ORDER BY published_at DESC LIMIT ?",
             (limit,),
         )
@@ -177,8 +184,8 @@ class ItemRepository(ImplementsItemRepository):
         self, published_after: datetime
     ) -> list[EmbeddedItem]:
         rows = await self._db.fetch_all(
-            "SELECT * FROM items WHERE length(embedding) > 0 AND published_at >= ? "
-            "ORDER BY published_at",
+            f"SELECT {_COLUMNS}, embedding FROM items "
+            "WHERE length(embedding) > 0 AND published_at >= ? ORDER BY published_at",
             (to_iso(published_after),),
         )
 
@@ -199,7 +206,8 @@ class ItemRepository(ImplementsItemRepository):
     @override
     async def list_by_event(self, event_id: str) -> list[StoredItem]:
         rows = await self._db.fetch_all(
-            "SELECT * FROM items WHERE event_id = ? ORDER BY published_at", (event_id,)
+            f"SELECT {_COLUMNS} FROM items WHERE event_id = ? ORDER BY published_at",
+            (event_id,),
         )
 
         return [to_stored_item(row) for row in rows]
@@ -280,7 +288,6 @@ def to_stored_item(row: Row) -> StoredItem:
         comments=_COMMENTS.validate_json(str(row["comments_json"])),
         tags=tuple(str(value) for value in tags) if isinstance(tags, list) else (),
         first_seen_at=from_iso(row["first_seen_at"]),
-        embedded=row["embedding"] is not None,
         event_id=None if row["event_id"] is None else str(row["event_id"]),
     )
 

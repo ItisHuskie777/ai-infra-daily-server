@@ -48,11 +48,6 @@ async def _fetch_one(
     if adapter is None:
         return _Settled(error=str(FetchError.UNSUPPORTED), detail=source.kind)
 
-    blocked = adapter.precheck(ctx, source)
-
-    if blocked is not None:
-        return _Settled(error=str(blocked))
-
     async with semaphore:
         # NOTE: Adapter boundary; a vendor exception becomes a value so siblings keep
         # running (FR1.5).

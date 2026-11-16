@@ -1,5 +1,6 @@
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Sequence
 from datetime import datetime
 from typing import override
 
@@ -9,6 +10,7 @@ from app.adapters.database import ImplementsDatabase
 from app.adapters.database import Row
 from app.models import DeliveryStatus
 from app.models import Digest
+from app.models import DigestEventPlacement
 from app.models import DigestSection
 from app.models import Feedback
 from app.models import Model
@@ -37,7 +39,9 @@ class DigestPlacementRecord(Model):
 
 class ImplementsDigestRepository(ABC):
     @abstractmethod
-    async def save(self, digest: Digest) -> None:
+    async def save(
+        self, digest: Digest, placements: Sequence[DigestEventPlacement]
+    ) -> None:
         """Stores the digest and its placements together; ranked events are not
         persisted."""
 
@@ -64,26 +68,14 @@ class ImplementsDigestRepository(ABC):
     async def list_placements(self, digest_id: str) -> list[DigestPlacementRecord]: ...
 
     @abstractmethod
-    async def digests_for_event(self, event_id: str) -> list[str]:
-        """Ids of sent digests that included the event, oldest first (FR4.1)."""
-
-    @abstractmethod
     async def record_feedback(self, feedback: Feedback) -> OnSuccess[None]:
         """Each link acts once: the same signal on the same target is a conflict."""
-
-    @abstractmethod
-    async def find_quiz_answer(
-        self, digest_id: str, question: QuizQuestion
-    ) -> str | None: ...
 
     @abstractmethod
     async def record_quiz_answer(
         self, digest_id: str, question: QuizQuestion, answer: str, *, now: datetime
     ) -> OnSuccess[None]:
         """One answer per digest and question; a repeat is a conflict."""
-
-    @abstractmethod
-    async def list_feedback_since(self, since: datetime) -> list[Feedback]: ...
 
 
 class DigestRepository(ImplementsDigestRepository):
@@ -93,7 +85,9 @@ class DigestRepository(ImplementsDigestRepository):
         self._db = db
 
     @override
-    async def save(self, digest: Digest) -> None:
+    async def save(
+        self, digest: Digest, placements: Sequence[DigestEventPlacement]
+    ) -> None:
         await self._db.transaction(
             [
                 (
@@ -128,7 +122,7 @@ class DigestRepository(ImplementsDigestRepository):
                             to_json([topic.value for topic in placement.event.topics]),
                         ),
                     )
-                    for placement in digest.placements
+                    for placement in placements
                 ),
             ]
         )
@@ -192,17 +186,6 @@ class DigestRepository(ImplementsDigestRepository):
         return [_to_placement(row) for row in rows]
 
     @override
-    async def digests_for_event(self, event_id: str) -> list[str]:
-        rows = await self._db.fetch_all(
-            "SELECT d.id FROM digests d JOIN digest_events de ON de.digest_id = d.id "
-            "WHERE de.event_id = ? AND d.delivery_status = 'sent' "
-            "ORDER BY d.created_at",
-            (event_id,),
-        )
-
-        return [str(row["id"]) for row in rows]
-
-    @override
     async def record_feedback(self, feedback: Feedback) -> OnSuccess[None]:
         changed = await self._db.execute(
             "INSERT OR IGNORE INTO feedback (created_at, digest_id, event_id, item_id, "
@@ -220,17 +203,6 @@ class DigestRepository(ImplementsDigestRepository):
         return StoreError.CONFLICT if changed == 0 else None
 
     @override
-    async def find_quiz_answer(
-        self, digest_id: str, question: QuizQuestion
-    ) -> str | None:
-        row = await self._db.fetch_one(
-            "SELECT answer FROM quiz_answers WHERE digest_id = ? AND question = ?",
-            (digest_id, question),
-        )
-
-        return None if row is None else str(row["answer"])
-
-    @override
     async def record_quiz_answer(
         self, digest_id: str, question: QuizQuestion, answer: str, *, now: datetime
     ) -> OnSuccess[None]:
@@ -242,25 +214,6 @@ class DigestRepository(ImplementsDigestRepository):
 
         return StoreError.CONFLICT if changed == 0 else None
 
-    @override
-    async def list_feedback_since(self, since: datetime) -> list[Feedback]:
-        rows = await self._db.fetch_all(
-            "SELECT * FROM feedback WHERE created_at >= ? ORDER BY created_at",
-            (to_iso(since),),
-        )
-
-        return [
-            Feedback(
-                created_at=from_iso(row["created_at"]),
-                digest_id=None if row["digest_id"] is None else str(row["digest_id"]),
-                event_id=None if row["event_id"] is None else str(row["event_id"]),
-                item_id=None if row["item_id"] is None else str(row["item_id"]),
-                source_id=None if row["source_id"] is None else str(row["source_id"]),
-                signal=str(row["signal"]),
-            )
-            for row in rows
-        ]
-
 
 def _to_digest(row: Row) -> Digest:
     return Digest(
@@ -269,7 +222,6 @@ def _to_digest(row: Row) -> Digest:
         style=str(row["style"]),
         subject=str(row["subject"]),
         html=str(row["html"]),
-        placements=(),
         health=_HEALTH.validate_json(str(row["health_json"])),
         delivery_status=str(row["delivery_status"]),
         delivery_error=None

@@ -16,6 +16,7 @@ class FetchError(ServiceError):
     NOT_CONFIGURED = "not_configured"
     UNSUPPORTED = "unsupported"
     BLOCKED = "blocked"
+    RATE_LIMITED = "rate_limited"
 
     @override
     def service(self) -> str:
@@ -24,16 +25,12 @@ class FetchError(ServiceError):
 
 class ImplementsSourceAdapter(ABC):
     """One per source kind. `fetch` returns the newest items the source currently
-    exposes; the caller caps, dedupes and records health, so adapters stay simple."""
+    exposes, or the reason it cannot run (missing cookie, browser or config) before
+    doing any I/O; the caller caps, dedupes and records health."""
 
     @property
     @abstractmethod
     def kind(self) -> SourceKind: ...
-
-    @abstractmethod
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        """Cheap, synchronous reason the source cannot run (missing cookie, browser or
-        config), or None when a fetch may be attempted."""
 
     @abstractmethod
     async def fetch(

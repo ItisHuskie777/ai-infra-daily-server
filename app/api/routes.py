@@ -22,14 +22,16 @@ from app.models import FeedbackSignal
 from app.models import Interests
 from app.models import Model
 from app.models import Profile
+from app.models import RunStatus
 from app.models import Source
 from app.models import Thread
-from app.pipeline import feedback
 from app.pipeline import links
+from app.pipeline import preview
 from app.pipeline import run
 from app.pipeline import schedule
 from app.pipeline import threads
 from app.pipeline.links import LinkError
+from app.repositories import RunRecord
 from app.repositories import StoreError
 from app.result import OnSuccess
 from app.result import ServiceError
@@ -40,6 +42,8 @@ logger = logging.get_logger(__name__)
 
 _DEFAULT_DIGEST_LIMIT = 10
 _MAX_DIGEST_LIMIT = 50
+_DEFAULT_RUN_LIMIT = 10
+_MAX_RUN_LIMIT = 100
 
 router = APIRouter()
 owner = APIRouter(prefix="/api", dependencies=[Depends(auth.require_owner)])
@@ -80,9 +84,25 @@ class DigestSummary(Model):
     created_at: str
 
 
+class RunSummary(Model):
+    """The public part of a run record; the detail may quote an error and stays behind
+    the owner token."""
+
+    started_at: str
+    finished_at: str | None
+    stage: str
+    outcome: RunStatus | None
+
+
 class HealthResponse(Model):
     ok: bool
     service: str
+    last_sent_date: str | None
+    last_run: RunSummary | None
+
+
+class RunsResponse(Model):
+    runs: tuple[RunRecord, ...]
 
 
 class SourcesResponse(Model):
@@ -167,9 +187,56 @@ def _log_run_result(task: asyncio.Task[run.RunOutcome]) -> None:
     )
 
 
+async def _manual_run(
+    ctx: AbstractContext, run_id: str, *, force: bool, dry_run: bool
+) -> run.RunOutcome:
+    try:
+        outcome = await run.run_pipeline(
+            ctx,
+            adapters=registry.ADAPTERS,
+            force=force,
+            dry_run=dry_run,
+            run_id=run_id,
+        )
+
+        if outcome.preview_html is not None:
+            path = await preview.write(
+                outcome.preview_html, f"{ctx.clock.now():%Y-%m-%d}"
+            )
+            logger.info("Dry run preview written.", extra={"path": str(path)})
+
+        return outcome
+    finally:
+        # NOTE: The API process lives for weeks; without this one manual run would
+        # keep the embedding model and the browser in memory until the next restart.
+        await ctx.embeddings.close()
+
+        if ctx.browser is not None:
+            await ctx.browser.close()
+
+
 @router.get("/api/health")
-async def health() -> HealthResponse:
-    return HealthResponse(ok=True, service="ai-infra-daily")
+async def health(ctx: Ctx) -> HealthResponse:
+    """Answers from the database, so it also says whether the pipeline is alive: the
+    last run attempted and the last day a digest went out."""
+    runs = await ctx.runs.list_recent(limit=1)
+    last = runs[0] if runs else None
+
+    return HealthResponse(
+        ok=True,
+        service="ai-infra-daily",
+        last_sent_date=await ctx.digests.latest_sent_date(),
+        last_run=None
+        if last is None
+        else RunSummary(
+            started_at=last.started_at.isoformat(),
+            finished_at=None
+            if last.finished_at is None
+            else last.finished_at.isoformat(),
+            stage=last.stage,
+            outcome=last.outcome,
+        ),
+    )
 
 
 _STYLE = (
@@ -393,19 +460,10 @@ async def list_threads(ctx: Ctx, pinned: bool = False) -> ThreadsResponse:
 async def patch_thread(
     thread_id: str, patch: ThreadPatch, ctx: Ctx
 ) -> ThreadResponse | JSONResponse:
-    found = await ctx.threads.find_by_id(thread_id)
-
-    if is_error(found):
-        return _error(found, _store_status(found))
-
-    query = feedback.pinned_query_for(found.title) if patch.pinned else None
-    await ctx.threads.set_pinned(thread_id, pinned=patch.pinned, query=query)
-    updated = await ctx.threads.find_by_id(thread_id)
+    updated = await threads.set_pinned(ctx, thread_id, pinned=patch.pinned)
 
     if is_error(updated):
         return _error(updated, _store_status(updated))
-
-    logger.info("Thread pin changed.", extra={"thread_id": thread_id})
 
     return ThreadResponse(thread=updated)
 
@@ -443,6 +501,13 @@ async def put_preferences(
     return await get_preferences(ctx)
 
 
+@owner.get("/runs")
+async def list_runs(ctx: Ctx, limit: int = _DEFAULT_RUN_LIMIT) -> RunsResponse:
+    runs = await ctx.runs.list_recent(limit=min(max(limit, 1), _MAX_RUN_LIMIT))
+
+    return RunsResponse(runs=tuple(runs))
+
+
 @owner.post("/runs", status_code=202, response_model=RunResponse)
 async def start_run(
     body: RunRequest, request: Request, ctx: Ctx
@@ -455,13 +520,7 @@ async def start_run(
 
     run_id = ctx.ids.new()
     task = asyncio.create_task(
-        run.run_pipeline(
-            ctx,
-            adapters=registry.ADAPTERS,
-            force=body.force,
-            dry_run=body.dry_run,
-            run_id=run_id,
-        ),
+        _manual_run(ctx, run_id, force=body.force, dry_run=body.dry_run),
         name=f"run-{run_id}",
     )
     task.add_done_callback(_log_run_result)

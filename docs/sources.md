@@ -1,7 +1,10 @@
 # Seeded sources
 
 `app/sources/seeds.py` seeds 49 sources on first run (`aid seed`); the owner edits them with
-`aid sources` or `PATCH /api/sources/{id}` afterwards, and `aid seed` never overwrites edits.
+`aid sources` or `PATCH /api/sources/{id}` afterwards. Seeding runs at the start of every
+pipeline run: it inserts missing sources and updates the name, category, language and
+config of existing ones from the seed file, so a corrected feed address reaches a database
+seeded earlier. It never touches `enabled` or `weight`, the two fields the owner edits.
 
 ## Live audit, 2026-11-05
 
@@ -30,7 +33,9 @@ An earlier audit the same day found ten broken seeds. What replaced them:
 Reddit answers anonymous requests to its JSON endpoints with 403 and allows about one
 request a minute to the Atom feeds. The adapter therefore reads
 `/r/<subreddit>/top/.rss?t=day`, one subreddit at a time, and waits out the window
-Reddit announces in `x-ratelimit-reset` before the next request. The feed has no scores
+Reddit announces in `x-ratelimit-reset` before the next request. A subreddit whose turn
+would come after the source deadline (`SOURCE_DEADLINE_SECONDS`) is reported as
+`rate_limited` at once instead of waiting to be cut off. The feed has no scores
 and no comments, so Reddit items carry neither; the day's `top` ordering and the
 `limit` in the source config stand in for a score threshold. Scores and top comments
 would need Reddit's OAuth API with an app id created by the owner.

@@ -23,10 +23,6 @@ class ImplementsPreferenceRepository(ABC):
     async def save_profile(self, profile: Profile, *, now: datetime) -> None: ...
 
     @abstractmethod
-    async def set_last_digest_date(self, date: str, *, now: datetime) -> None:
-        """Changes one field in place, so a profile edited during a run is kept."""
-
-    @abstractmethod
     async def interests(self) -> Interests: ...
 
     @abstractmethod
@@ -51,7 +47,6 @@ class PreferenceRepository(ImplementsPreferenceRepository):
                 timezone=settings.TIMEZONE,
                 delivery_hour=settings.DELIVERY_HOUR,
                 digest_style=DigestStyle(settings.DIGEST_STYLE),
-                last_digest_date=None,
             )
 
         return Profile.model_validate_json(str(row["value_json"]))
@@ -59,14 +54,6 @@ class PreferenceRepository(ImplementsPreferenceRepository):
     @override
     async def save_profile(self, profile: Profile, *, now: datetime) -> None:
         await self._save(_PROFILE_KEY, profile.model_dump_json(), now)
-
-    @override
-    async def set_last_digest_date(self, date: str, *, now: datetime) -> None:
-        await self._db.execute(
-            "UPDATE preferences SET value_json = json_set(value_json, "
-            "'$.last_digest_date', ?), updated_at = ? WHERE key = ?",
-            (date, to_iso(now), _PROFILE_KEY),
-        )
 
     @override
     async def interests(self) -> Interests:

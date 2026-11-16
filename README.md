@@ -32,15 +32,16 @@ the Python 3.14 rewrite of a Cloudflare Workers prototype; it runs on one Linux 
   | sources, items,   |   | http (httpx)  llm (DeepSeek)  email      |
   | events, threads,  |   | embeddings (fastembed, local ONNX)       |
   | digests, prefs,   |   | browser (Playwright, cookie sessions)    |
-  | runs  -> SQLite   |   | clock                                   |
+  | runs  -> SQLite   |   | clock, ids                              |
   +-------------------+   +-----------------------------------------+
 ```
 
-Dependencies point one way: `settings`, `logging` and `result` are leaves; `models` is
-pure data; `adapters` wrap every third party; `repositories` own the SQL; `context`
-bundles them; `sources` and `pipeline` contain the logic and see only `AbstractContext`;
-`cli` and `api` are the entry points. Expected failures are returned as values
-(`OnSuccess[T]`), never raised.
+Dependencies point one way: `settings`, `logging`, `result` and `vectors` are leaves;
+`models` is pure data; `adapters` wrap every third party; `repositories` own the SQL;
+`context` bundles them; `sources` and `pipeline` contain the logic and reach every
+adapter and repository through `AbstractContext`, importing from those packages only
+types and error values; `cli` and `api` are the entry points. Expected failures are
+returned as values (`OnSuccess[T]`), never raised.
 
 ## Ranking and learning
 
@@ -72,13 +73,14 @@ app/
   logging.py         JSON logging with scoped fields (run_id, source_id)
   result.py          ServiceError base, OnSuccess[T], is_error / is_success
   models.py          frozen Pydantic models for every domain object
+  vectors.py         the embedding vector type and its arithmetic
   context.py         AbstractContext, the production Context and default()
-  adapters/          http, llm, embeddings, browser, email, clock, database
+  adapters/          http, llm, embeddings, browser, email, clock, ids, database
   repositories/      one class per stored resource; all SQL lives here
   sources/           one adapter per source kind, fetch_all, seeds, registry
-  pipeline/          ingest, embed, cluster, threads, rank, recommend, select,
+  pipeline/          ingest, embed, cluster, threads, rank, recommend, select, edit,
                      summarise, compose, quiz, links, feedback, feedback_token,
-                     schedule, run
+                     schedule, run, maintain, preview
   api/               FastAPI app, bearer auth, routes
   cli.py             the `aid` command
 migrations/          numbered SQL files applied by `aid migrate`
@@ -94,7 +96,7 @@ data/                SQLite database, model cache and dry-run previews (git-igno
 uv sync --all-groups                 # install
 cp .env.example .env                 # then fill it in
 uv run aid migrate                   # create or upgrade the database
-uv run aid seed                      # insert the default sources
+uv run aid seed                      # insert missing sources, refresh the others
 uv run aid run --force --dry-run     # full pipeline, HTML written to data/
 uv run aid run                       # sends only at the delivery hour, once per day
 uv run aid stage fetch|embed|cluster|threads
@@ -102,6 +104,7 @@ uv run aid sources list|enable|disable|weight
 uv run aid prefs show|set-email|set-hour|set-style|set-depth|add-topic|remove-topic|
            add-keyword [--exclude]|remove-keyword|follow|block|unblock
 uv run aid digests list
+uv run aid runs list                 # recent runs: outcome, last stage, error
 uv run aid threads list|pin <id>|unpin <id>
 uv run aid maintain                  # prune old data, daily backup (the scheduler runs it)
 uv run aid serve                     # HTTP API on API_HOST:API_PORT

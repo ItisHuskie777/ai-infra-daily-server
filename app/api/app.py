@@ -13,7 +13,7 @@ from app import context
 from app import logging
 from app import settings
 from app.api import routes
-from app.context import Context
+from app.context import AbstractContext
 from app.pipeline.run import RunOutcome
 from app.result import is_error
 
@@ -21,7 +21,7 @@ logger = logging.get_logger(__name__)
 
 
 def _lifespan(
-    context_factory: Callable[[], Context],
+    context_factory: Callable[[], AbstractContext],
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -59,7 +59,9 @@ async def _stop_run(task: asyncio.Task[RunOutcome] | None) -> None:
         await task
 
 
-def create_app(context_factory: Callable[[], Context] = context.default) -> FastAPI:
+def create_app(
+    context_factory: Callable[[], AbstractContext] = context.default,
+) -> FastAPI:
     """`context_factory` lets a test serve the API over a context of fakes."""
     app = FastAPI(title="AI Infra Daily", lifespan=_lifespan(context_factory))
     app.include_router(routes.router)

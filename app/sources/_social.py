@@ -73,8 +73,13 @@ def looks_like_login_url(url: str) -> bool:
     return any(marker in lowered for marker in _LOGIN_URL_MARKERS)
 
 
-def is_blocked(page: RenderedPage) -> bool:
-    return looks_like_login_url(page.final_url) or looks_like_login_wall(page.html)
+def is_blocked(page: RenderedPage, *, has_content: bool) -> bool:
+    """The wall markers are ordinary words a post may contain, so the page text only
+    counts when nothing was extracted from the page."""
+    if looks_like_login_url(page.final_url):
+        return True
+
+    return not has_content and looks_like_login_wall(page.html)
 
 
 def parse_count(raw: Count) -> int | None:

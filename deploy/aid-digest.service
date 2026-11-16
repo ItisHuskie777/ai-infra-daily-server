@@ -1,6 +1,7 @@
 # /etc/systemd/system/aid-digest.service
-# One pipeline run. Started hourly by aid-digest.timer; the app decides whether this is
-# the owner's delivery hour and whether today's digest has already gone out.
+# Housekeeping, then one pipeline run, as the Compose scheduler does every hour. Started
+# hourly by aid-digest.timer; the app decides whether this is the owner's delivery hour
+# and whether today's digest has already gone out.
 [Unit]
 Description=AI Infra Daily digest run
 After=docker.service
@@ -9,5 +10,7 @@ Requires=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/ai-infra-daily-server
+ExecStart=/usr/bin/docker compose run --rm aid aid maintain
 ExecStart=/usr/bin/docker compose run --rm aid aid run
-TimeoutStartSec=20min
+# A run normally takes 15-20 minutes; the limit only stops one that hangs.
+TimeoutStartSec=45min

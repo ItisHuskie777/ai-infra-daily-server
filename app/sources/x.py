@@ -173,13 +173,18 @@ async def _render_timeline(
     if is_error(rendered):
         return FetchError.FETCH_FAILED
 
-    if _social.is_blocked(rendered):
+    try:
+        cards = _TIMELINE.validate_python(rendered.extracted)
+    except pydantic.ValidationError:
+        cards = None
+
+    if _social.is_blocked(rendered, has_content=bool(cards)):
         return FetchError.BLOCKED
 
-    try:
-        return _TIMELINE.validate_python(rendered.extracted)
-    except pydantic.ValidationError:
+    if cards is None:
         return FetchError.PARSE_FAILED
+
+    return cards
 
 
 def _select_cards(timeline: list[_TweetCard]) -> list[_TweetCard]:
@@ -200,24 +205,15 @@ def _select_cards(timeline: list[_TweetCard]) -> list[_TweetCard]:
 
 
 class XAdapter(ImplementsSourceAdapter):
+    __slots__ = ("_cookie",)
+
+    def __init__(self, *, cookie: str) -> None:
+        self._cookie = cookie
+
     @property
     @override
     def kind(self) -> SourceKind:
         return "x"
-
-    @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        config = source.config
-
-        if not isinstance(config, XConfig):
-            return FetchError.UNSUPPORTED
-
-        if ctx.browser is None or ctx.x_cookie == "":
-            return FetchError.NOT_CONFIGURED
-
-        timeline_url = _timeline_url_for(config)
-
-        return timeline_url if isinstance(timeline_url, FetchError) else None
 
     @override
     async def fetch(
@@ -229,7 +225,7 @@ class XAdapter(ImplementsSourceAdapter):
             return FetchError.UNSUPPORTED
 
         browser = ctx.browser
-        cookie = ctx.x_cookie
+        cookie = self._cookie
 
         if browser is None or cookie == "":
             return FetchError.NOT_CONFIGURED

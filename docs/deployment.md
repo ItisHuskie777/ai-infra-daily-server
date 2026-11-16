@@ -37,9 +37,9 @@ Edit `.env`. Every variable without a default must be present; the ones that mat
 Generate secrets with `openssl rand -hex 32`. `DATABASE_PATH`, `API_HOST` and `API_PORT`
 are overridden by `compose.yaml` inside the containers.
 
-`OWNER_EMAIL`, `TIMEZONE`, `DELIVERY_HOUR` and `DIGEST_STYLE` only seed the profile: once
-a digest has been sent the profile lives in the database, and `aid prefs` or
-`PUT /api/preferences` changes it.
+`OWNER_EMAIL`, `TIMEZONE`, `DELIVERY_HOUR` and `DIGEST_STYLE` only seed the profile: after
+the first change made with `aid prefs` or `PUT /api/preferences` the profile lives in the
+database and these values are no longer read.
 
 The SQLite database, the downloaded embedding model and dry-run previews live in
 `./data`, which Compose mounts into every container. Back up that directory.
@@ -75,6 +75,12 @@ docker compose logs -f scheduler
 curl http://127.0.0.1:8787/api/health      # the port from API_PUBLISH
 ```
 
+`/api/health` needs no token and answers from the database. Besides `ok` it returns
+`last_sent_date`, the last local day a digest went out, and `last_run`, the last run
+that was attempted, with its start, finish, last stage and outcome. That is the quickest
+way to see from outside whether the pipeline is still working. A run the schedule
+skipped leaves no record, so `last_run` normally shows the morning's send.
+
 Both containers restart with Docker after a reboot. The scheduler wakes at the top of
 every hour; `aid run` compares the current hour in the owner's timezone with the
 delivery hour and the date of the last digest, so it sends at most one digest per local
@@ -89,7 +95,8 @@ Owner endpoints (all need `Authorization: Bearer $OWNER_TOKEN`):
 | `GET /api/digests`, `GET /api/digests/{id}` | Recent digests; the HTML of one |
 | `GET /api/threads?pinned=1` | Active or pinned threads |
 | `GET /api/preferences`, `PUT /api/preferences` | Profile and interests; PUT takes `{"profile": ..., "interests": ...}` |
-| `POST /api/runs` | `{"force": true, "dry_run": false}` starts a run in the background and returns its id |
+| `GET /api/runs?limit=10` | Recent runs, newest first, with the error behind a failure |
+| `POST /api/runs` | `{"force": true, "dry_run": false}` starts a run in the background and returns its id; a dry run writes its preview to `data/` |
 
 ## 5. HTTPS (optional)
 
@@ -155,4 +162,8 @@ docker compose up -d
   (`aid sources disable <id>` silences it).
 - Logs are JSON lines on stderr: `docker compose logs scheduler` for runs,
   `docker compose logs api` for the API. Every line of a run carries its `run_id`; the
-  `runs` table records the last stage reached.
+  `runs` table records the last stage reached, and `aid runs list` or `GET /api/runs`
+  prints it.
+- Stopping the scheduler in the middle of a run (`docker compose up -d` after a deploy)
+  cancels that run cleanly: it is recorded as `cancelled`, the lease is released, and
+  the next hour builds the digest again.

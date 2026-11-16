@@ -21,9 +21,9 @@ libraries, which needs root).
 
 For each run:
 
-1. The timeline is rendered with the session cookies and scrolled three times. `precheck`
-   returns `not_configured` first when there is no browser, no cookie, or mode `user` without a
-   `handle`, so the fetch is never attempted.
+1. The timeline is rendered with the session cookies and scrolled three times. `fetch`
+   returns `not_configured` before rendering when there is no browser, no cookie, or mode
+   `user` without a `handle`.
 2. An extract script (a JavaScript expression evaluated in the page, validated with a Pydantic
    `TypeAdapter`) reads every `article[data-testid="tweet"]`: the tweet id and author handle
    from the permalink (`/{handle}/status/{id}`, the link that wraps the `<time>` element), the
@@ -42,7 +42,8 @@ used, X remembers the choice per account.
 ## Obtaining the cookie
 
 The adapter needs the raw `Cookie` request header of a logged-in session, stored as `X_COOKIE` in
-`.env` and exposed to the code as `ctx.x_cookie`. An empty value means the source is off.
+`.env` and handed to `XAdapter` when `app/sources/registry.py` builds it. An empty value means
+the source is off.
 
 1. Log in at `https://x.com` in a desktop browser with the throwaway account.
 2. Open the developer tools, Network tab, and reload `https://x.com/home`.

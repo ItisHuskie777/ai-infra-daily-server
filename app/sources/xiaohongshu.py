@@ -336,7 +336,18 @@ async def _render_note(
 
         return None
 
-    if _social.is_blocked(rendered):
+    try:
+        detail = _NOTE_DETAIL.validate_python(rendered.extracted)
+    except pydantic.ValidationError as error:
+        logger.warning(
+            "Note page extraction did not match the expected shape.",
+            extra={"note_id": feed_note.note_id, "issues": error.error_count()},
+        )
+        detail = None
+
+    has_text = detail is not None and (detail.title or detail.desc) is not None
+
+    if _social.is_blocked(rendered, has_content=has_text):
         logger.warning(
             "Note page looks like a login wall; using feed card only.",
             extra={"note_id": feed_note.note_id},
@@ -344,15 +355,7 @@ async def _render_note(
 
         return None
 
-    try:
-        return _NOTE_DETAIL.validate_python(rendered.extracted)
-    except pydantic.ValidationError as error:
-        logger.warning(
-            "Note page extraction did not match the expected shape.",
-            extra={"note_id": feed_note.note_id, "issues": error.error_count()},
-        )
-
-        return None
+    return detail
 
 
 async def _render_feed(
@@ -368,13 +371,18 @@ async def _render_feed(
     if is_error(rendered):
         return FetchError.FETCH_FAILED
 
-    if _social.is_blocked(rendered):
+    try:
+        notes = _FEED.validate_python(rendered.extracted)
+    except pydantic.ValidationError:
+        notes = None
+
+    if _social.is_blocked(rendered, has_content=bool(notes)):
         return FetchError.BLOCKED
 
-    try:
-        return _FEED.validate_python(rendered.extracted)
-    except pydantic.ValidationError:
+    if notes is None:
         return FetchError.PARSE_FAILED
+
+    return notes
 
 
 def _select_notes(feed: list[_FeedNote]) -> list[_FeedNote]:
@@ -395,24 +403,15 @@ def _select_notes(feed: list[_FeedNote]) -> list[_FeedNote]:
 
 
 class XiaohongshuAdapter(ImplementsSourceAdapter):
+    __slots__ = ("_cookie",)
+
+    def __init__(self, *, cookie: str) -> None:
+        self._cookie = cookie
+
     @property
     @override
     def kind(self) -> SourceKind:
         return "xiaohongshu"
-
-    @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        config = source.config
-
-        if not isinstance(config, XiaohongshuConfig):
-            return FetchError.UNSUPPORTED
-
-        if ctx.browser is None or ctx.xiaohongshu_cookie == "":
-            return FetchError.NOT_CONFIGURED
-
-        feed_url = _feed_url_for(config)
-
-        return feed_url if isinstance(feed_url, FetchError) else None
 
     @override
     async def fetch(
@@ -424,7 +423,7 @@ class XiaohongshuAdapter(ImplementsSourceAdapter):
             return FetchError.UNSUPPORTED
 
         browser = ctx.browser
-        cookie = ctx.xiaohongshu_cookie
+        cookie = self._cookie
 
         if browser is None or cookie == "":
             return FetchError.NOT_CONFIGURED

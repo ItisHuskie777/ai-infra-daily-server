@@ -16,9 +16,10 @@ from app.models import Model
 from app.models import SourceHealth
 from app.models import StoredItem
 from app.models import Thread
+from app.pipeline import _items
 from app.pipeline import feedback_token
 from app.pipeline.quiz import Quiz
-from app.pipeline.summarise import EventSummary
+from app.pipeline.summarise import SummarisedEvent
 
 type LinkSigner = Callable[[str], str]
 """Returns the token for one link, given the scope that link is allowed to act on."""
@@ -41,17 +42,6 @@ _FEEDBACK_LABELS: dict[FeedbackSignal, str] = {
     FeedbackSignal.PIN_THREAD: "pin thread",
 }
 _ENVIRONMENT = Environment(loader=FileSystemLoader(_TEMPLATES), autoescape=True)
-
-
-class ComposedEvent(Model):
-    placement: DigestEventPlacement
-    summary: EventSummary
-    thread: Thread | None
-
-
-class ComposedSection(Model):
-    section: DigestSection
-    events: tuple[ComposedEvent, ...]
 
 
 class ComposedDigest(Model):
@@ -97,27 +87,20 @@ class _SectionView(Model):
     events: tuple[_EventView, ...]
 
 
-def _ordered_sections(sections: Sequence[ComposedSection]) -> list[ComposedSection]:
-    ordered: list[ComposedSection] = []
+def _by_section(
+    events: Sequence[SummarisedEvent],
+) -> list[tuple[DigestSection, list[SummarisedEvent]]]:
+    """The sections that have events, in the order the email shows them."""
+    grouped = [
+        (section, [event for event in events if event.placement.section is section])
+        for section in DigestSection
+    ]
 
-    for section in DigestSection:
-        events = tuple(
-            event
-            for candidate in sections
-            if candidate.section is section
-            for event in candidate.events
-        )
-
-        if events:
-            ordered.append(ComposedSection(section=section, events=events))
-
-    return ordered
+    return [(section, members) for section, members in grouped if members]
 
 
 def _primary_item(placement: DigestEventPlacement) -> StoredItem | None:
-    wanted = set(placement.item_ids)
-    selected = [item for item in placement.event.items if item.id in wanted]
-    pool = selected if selected else list(placement.event.items)
+    pool = _items.chosen_items(placement)
 
     for kind in (ItemKind.PRIMARY, ItemKind.MEDIA):
         for item in pool:
@@ -131,7 +114,7 @@ def _feedback_url(
     base_url: str,
     sign: LinkSigner,
     signal: FeedbackSignal,
-    event: ComposedEvent,
+    event: SummarisedEvent,
     primary: StoredItem | None,
 ) -> str:
     event_id = event.placement.event.id
@@ -153,7 +136,7 @@ def _feedback_url(
 
 
 def _feedback_links(
-    base_url: str, sign: LinkSigner, event: ComposedEvent, primary: StoredItem | None
+    base_url: str, sign: LinkSigner, event: SummarisedEvent, primary: StoredItem | None
 ) -> tuple[_FeedbackLink, ...]:
     # NOTE: Two links per event double the size of a compact digest of sixty events,
     # past the point where mail clients clip the message; the quiz collects taste.
@@ -166,7 +149,7 @@ def _feedback_links(
         FeedbackSignal.MUTE_SOURCE,
     ]
 
-    if event.thread is not None:
+    if event.placement.event.thread is not None:
         signals.append(FeedbackSignal.PIN_THREAD)
 
     return tuple(
@@ -185,14 +168,16 @@ def _day_badge(thread: Thread | None) -> str | None:
     return f"Day {thread.day_count} of this story"
 
 
-def _event_view(event: ComposedEvent, *, base_url: str, sign: LinkSigner) -> _EventView:
+def _event_view(
+    event: SummarisedEvent, *, base_url: str, sign: LinkSigner
+) -> _EventView:
     primary = _primary_item(event.placement)
 
     return _EventView(
         title=event.summary.title,
         url=None if primary is None else primary.url,
         language=event.summary.language.value,
-        day_badge=_day_badge(event.thread),
+        day_badge=_day_badge(event.placement.event.thread),
         summary=event.summary.summary,
         key_claims=event.summary.key_claims,
         takes=tuple(
@@ -249,14 +234,12 @@ def _quiz_view(quiz: Quiz, *, base_url: str, sign: LinkSigner) -> _QuizView:
 def compose_digest_html(
     *,
     date: str,
-    sections: Sequence[ComposedSection],
+    events: Sequence[SummarisedEvent],
     health: Sequence[SourceHealth],
     feedback_base_url: str,
     sign_link: LinkSigner,
     quizzes: Sequence[Quiz] = (),
 ) -> ComposedDigest:
-    ordered = _ordered_sections(sections)
-    events = [event for section in ordered for event in section.events]
     top_title = (
         max(
             events, key=lambda event: event.placement.event.relevance_score
@@ -268,13 +251,13 @@ def compose_digest_html(
     base_url = feedback_base_url.rstrip("/")
     views = [
         _SectionView(
-            title=_SECTION_TITLES[section.section],
+            title=_SECTION_TITLES[section],
             events=tuple(
                 _event_view(event, base_url=base_url, sign=sign_link)
-                for event in section.events
+                for event in members
             ),
         )
-        for section in ordered
+        for section, members in _by_section(events)
     ]
     failed = [source for source in health if not source.ok]
     html = _ENVIRONMENT.get_template("digest.html.j2").render(

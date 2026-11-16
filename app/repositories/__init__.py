@@ -10,6 +10,7 @@ from .items import ItemRepository
 from .preferences import ImplementsPreferenceRepository
 from .preferences import PreferenceRepository
 from .runs import ImplementsRunRepository
+from .runs import RunRecord
 from .runs import RunRepository
 from .sources import ImplementsSourceRepository
 from .sources import SourceRepository

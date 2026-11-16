@@ -54,13 +54,12 @@ class EventRepository(ImplementsEventRepository):
     @override
     async def create(self, event: Event) -> None:
         await self._db.execute(
-            "INSERT INTO events (id, thread_id, title, summary, created_at, "
-            "updated_at, centroid_item_id) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO events (id, thread_id, title, created_at, updated_at, "
+            "centroid_item_id) VALUES (?,?,?,?,?,?)",
             (
                 event.id,
                 event.thread_id,
                 event.title,
-                event.summary,
                 to_iso(event.created_at),
                 to_iso(event.updated_at),
                 event.centroid_item_id,
@@ -70,12 +69,11 @@ class EventRepository(ImplementsEventRepository):
     @override
     async def update(self, event: Event) -> None:
         await self._db.execute(
-            "UPDATE events SET thread_id = ?, title = ?, summary = ?, updated_at = ?, "
+            "UPDATE events SET thread_id = ?, title = ?, updated_at = ?, "
             "centroid_item_id = ? WHERE id = ?",
             (
                 event.thread_id,
                 event.title,
-                event.summary,
                 to_iso(event.updated_at),
                 event.centroid_item_id,
                 event.id,
@@ -156,7 +154,6 @@ def _to_event(row: Row) -> Event:
         id=str(row["id"]),
         thread_id=None if row["thread_id"] is None else str(row["thread_id"]),
         title=str(row["title"]),
-        summary=str(row["summary"]),
         created_at=from_iso(row["created_at"]),
         updated_at=from_iso(row["updated_at"]),
         centroid_item_id=None

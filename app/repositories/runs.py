@@ -5,11 +5,25 @@ from datetime import timedelta
 from typing import override
 
 from app.adapters.database import ImplementsDatabase
+from app.adapters.database import Row
+from app.models import Model
 from app.models import RunStatus
+from app.repositories._common import from_iso
 from app.repositories._common import to_iso
 
 _PIPELINE_LEASE = "pipeline"
 _FAILED_OUTCOMES = (RunStatus.FAILED, RunStatus.CRASHED, RunStatus.ABANDONED)
+
+
+class RunRecord(Model):
+    id: str
+    started_at: datetime
+    # None while the run is in progress.
+    finished_at: datetime | None
+    stage: str
+    outcome: RunStatus | None
+    detail: str | None
+    digest_id: str | None
 
 
 class ImplementsRunRepository(ABC):
@@ -32,6 +46,10 @@ class ImplementsRunRepository(ABC):
 
     @abstractmethod
     async def count_failed_since(self, since: datetime) -> int: ...
+
+    @abstractmethod
+    async def list_recent(self, *, limit: int) -> list[RunRecord]:
+        """Newest first. A run the schedule skipped leaves no record."""
 
     @abstractmethod
     async def prune_before(self, before: datetime) -> int:
@@ -103,6 +121,14 @@ class RunRepository(ImplementsRunRepository):
         return 0 if row is None else int(str(row["failures"]))
 
     @override
+    async def list_recent(self, *, limit: int) -> list[RunRecord]:
+        rows = await self._db.fetch_all(
+            "SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT ?", (limit,)
+        )
+
+        return [_to_record(row) for row in rows]
+
+    @override
     async def prune_before(self, before: datetime) -> int:
         runs = await self._db.execute(
             "DELETE FROM runs WHERE started_at < ? AND finished_at IS NOT NULL",
@@ -142,3 +168,22 @@ class RunRepository(ImplementsRunRepository):
             "WHERE id = ?",
             (to_iso(now), outcome, detail, digest_id, run_id),
         )
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _to_record(row: Row) -> RunRecord:
+    outcome = _optional(row["outcome"])
+    finished_at = row["finished_at"]
+
+    return RunRecord(
+        id=str(row["id"]),
+        started_at=from_iso(row["started_at"]),
+        finished_at=None if finished_at is None else from_iso(finished_at),
+        stage=str(row["stage"]),
+        outcome=None if outcome is None else RunStatus(outcome),
+        detail=_optional(row["detail"]),
+        digest_id=_optional(row["digest_id"]),
+    )

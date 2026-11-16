@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import override
 
 from app import logging
+from app import settings
 from app.adapters.http import HttpResponse
 from app.context import AbstractContext
 from app.models import ItemKind
@@ -28,6 +29,11 @@ logger = logging.get_logger(__name__)
 _REDDIT_BASE = "https://www.reddit.com"
 _TOO_MANY_REQUESTS = 429
 _MAX_WAIT_SECONDS = 120.0
+# A request that cannot start this long after its fetch began would be cut off by the
+# source deadline, so it gives up at once instead of sleeping under the lock.
+_START_BUDGET_SECONDS = (
+    settings.SOURCE_DEADLINE_SECONDS - settings.SOURCE_FETCH_TIMEOUT_SECONDS
+)
 _AUTHOR_PREFIX = "/u/"
 _LINK_ANCHOR = re.compile(r'<a href="([^"]+)">\[link\]</a>')
 _FOOTER = re.compile(r"\s*submitted by\s+/u/\S+\s*\[link\]\s*\[comments\]\s*$")
@@ -75,13 +81,6 @@ class RedditAdapter(ImplementsSourceAdapter):
         return "reddit"
 
     @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        if not isinstance(source.config, RedditConfig):
-            return FetchError.UNSUPPORTED
-
-        return None
-
-    @override
     async def fetch(
         self, ctx: AbstractContext, source: Source
     ) -> OnSuccess[list[SourceItem]]:
@@ -93,7 +92,11 @@ class RedditAdapter(ImplementsSourceAdapter):
             ctx,
             f"{_REDDIT_BASE}/r/{config.subreddit}/{config.sort}/.rss"
             f"?t=day&limit={config.limit}",
+            give_up_at=ctx.clock.now() + timedelta(seconds=_START_BUDGET_SECONDS),
         )
+
+        if response is FetchError.RATE_LIMITED:
+            return response
 
         if is_error(response) or not response.ok:
             return FetchError.FETCH_FAILED
@@ -134,9 +137,13 @@ class RedditAdapter(ImplementsSourceAdapter):
 
         return items
 
-    async def _get(self, ctx: AbstractContext, url: str) -> OnSuccess[HttpResponse]:
+    async def _get(
+        self, ctx: AbstractContext, url: str, *, give_up_at: datetime
+    ) -> OnSuccess[HttpResponse]:
         async with self._lock:
-            await self._wait_for_window(ctx)
+            if not await self._wait_for_window(ctx, give_up_at):
+                return FetchError.RATE_LIMITED
+
             response = await ctx.http.get(url)
 
             if is_error(response):
@@ -148,7 +155,10 @@ class RedditAdapter(ImplementsSourceAdapter):
                 return response
 
             logger.info("Reddit rate limit reached; retrying once.", extra={"url": url})
-            await self._wait_for_window(ctx)
+
+            if not await self._wait_for_window(ctx, give_up_at):
+                return FetchError.RATE_LIMITED
+
             retried = await ctx.http.get(url)
 
             if not is_error(retried):
@@ -156,14 +166,22 @@ class RedditAdapter(ImplementsSourceAdapter):
 
             return retried
 
-    async def _wait_for_window(self, ctx: AbstractContext) -> None:
+    async def _wait_for_window(
+        self, ctx: AbstractContext, give_up_at: datetime
+    ) -> bool:
+        """False when Reddit's window opens too late for this fetch to use it."""
         if self._ready_at is None:
-            return
+            return True
+
+        if self._ready_at > give_up_at:
+            return False
 
         delay = (self._ready_at - ctx.clock.now()).total_seconds()
 
         if delay > 0:
             await self._sleep(delay)
+
+        return True
 
     def _note_window(self, ctx: AbstractContext, response: HttpResponse) -> None:
         remaining = _header_number(response, "x-ratelimit-remaining")

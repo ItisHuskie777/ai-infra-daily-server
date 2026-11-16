@@ -11,13 +11,8 @@ from app.models import Model
 from app.models import RankedEvent
 from app.models import StoredItem
 from app.models import Topic
+from app.pipeline import _items
 
-_KIND_ORDER = {
-    ItemKind.PRIMARY: 0,
-    ItemKind.MEDIA: 1,
-    ItemKind.COMMENTARY: 2,
-    ItemKind.DISCUSSION: 3,
-}
 _VOICE_KINDS = frozenset({ItemKind.COMMENTARY})
 _SECTION_OF_TOPIC: dict[Topic, DigestSection] = {
     Topic.MODELS: DigestSection.MODELS,
@@ -43,24 +38,10 @@ class _Candidate(Model):
     community_only: bool
 
 
-def engagement_value(item: StoredItem) -> int:
-    engagement = item.engagement
-
-    if engagement is None:
-        return 0
-
-    return (
-        (engagement.likes or 0)
-        + (engagement.score or 0)
-        + (engagement.comments or 0)
-        + (engagement.shares or 0)
-    )
-
-
 def _item_order(item: StoredItem) -> tuple[int, int, float]:
     return (
-        _KIND_ORDER[item.kind],
-        -engagement_value(item),
+        _items.KIND_ORDER[item.kind],
+        -_items.engagement_value(item),
         item.published_at.timestamp(),
     )
 
@@ -71,9 +52,6 @@ def section_for(topics: Sequence[Topic]) -> DigestSection:
         return DigestSection.OTHER
 
     return _SECTION_OF_TOPIC[topics[0]]
-
-
-_REPORT_KINDS = frozenset({ItemKind.PRIMARY, ItemKind.MEDIA})
 
 
 def title_key(title: str) -> str:
@@ -106,7 +84,7 @@ def fresh_events(
 
         is_follow_up = len(unsent) < len(event.items)
         substantial = len(unsent) >= settings.FOLLOW_UP_MIN_NEW_ITEMS or any(
-            item.kind in _REPORT_KINDS for item in unsent
+            item.kind in _items.REPORT_KINDS for item in unsent
         )
 
         if is_follow_up and not substantial:

@@ -6,14 +6,16 @@ from datetime import tzinfo
 
 from app import logging
 from app import settings
-from app.adapters.embeddings import Vector
-from app.adapters.embeddings import cosine_similarity
 from app.context import AbstractContext
 from app.models import Event
 from app.models import Thread
+from app.pipeline import _keywords
 from app.pipeline import schedule
 from app.pipeline.embed import build_embedding_text
+from app.result import OnSuccess
 from app.result import is_error
+from app.vectors import Vector
+from app.vectors import cosine_similarity
 
 logger = logging.get_logger(__name__)
 
@@ -44,6 +46,11 @@ def thread_id_for(event_id: str) -> str:
     return f"thr-{event_id.removeprefix('evt-')}"
 
 
+def pinned_query_for(title: str) -> str:
+    """The few distinctive words of a thread's title; later events match on them."""
+    return " ".join(_keywords.extract_keywords(title, ()))
+
+
 def matches_pinned_query(query: str, text: str) -> bool:
     """A pinned query is a few keywords; an event matches when at least two of them
     (or the only one) appear in its text."""
@@ -71,10 +78,6 @@ def touch_thread(thread: Thread, event: Event, *, zone: tzinfo) -> Thread:
 
 def _local_date(moment: datetime, zone: tzinfo) -> str:
     return moment.astimezone(zone).date().isoformat()
-
-
-def _event_text(event: Event) -> str:
-    return f"{event.title}\n{event.summary}"
 
 
 async def _load_events(ctx: AbstractContext, event_ids: Sequence[str]) -> list[Event]:
@@ -150,7 +153,7 @@ async def _match_pinned(
             (
                 thread
                 for thread in queried
-                if matches_pinned_query(thread.pinned_query or "", _event_text(event))
+                if matches_pinned_query(thread.pinned_query or "", event.title)
             ),
             None,
         )
@@ -185,9 +188,7 @@ async def _embed_event(ctx: AbstractContext, event: Event) -> Vector:
         else await ctx.items.find_by_ids([event.centroid_item_id])
     )
 
-    text = (
-        _event_text(event) if len(centroid) == 0 else build_embedding_text(centroid[0])
-    )
+    text = event.title if len(centroid) == 0 else build_embedding_text(centroid[0])
 
     vectors = await ctx.embeddings.embed([text])
 
@@ -332,3 +333,24 @@ async def link_events_to_threads(ctx: AbstractContext, event_ids: Sequence[str])
     )
 
     return state.linked
+
+
+async def set_pinned(
+    ctx: AbstractContext, thread_id: str, *, pinned: bool
+) -> OnSuccess[Thread]:
+    """The one place a thread is pinned or unpinned, for the email link, the API and
+    the command line alike; a pin stores the keywords later events are matched on."""
+    found = await ctx.threads.find_by_id(thread_id)
+
+    if is_error(found):
+        return found
+
+    query = pinned_query_for(found.title) if pinned else None
+    changed = await ctx.threads.set_pinned(thread_id, pinned=pinned, query=query)
+
+    if is_error(changed):
+        return changed
+
+    logger.info("Thread pin changed.", extra={"thread_id": thread_id, "pinned": pinned})
+
+    return found.model_copy(update={"pinned": pinned, "pinned_query": query})

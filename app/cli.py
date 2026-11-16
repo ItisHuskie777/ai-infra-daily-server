@@ -1,10 +1,10 @@
 import argparse
 import asyncio
+import signal
 import sys
 from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import timedelta
-from pathlib import Path
 
 from app import context
 from app import logging
@@ -18,8 +18,9 @@ from app.models import Interests
 from app.models import TechnicalDepth
 from app.pipeline import cluster
 from app.pipeline import embed
-from app.pipeline import feedback
 from app.pipeline import ingest
+from app.pipeline import maintain
+from app.pipeline import preview
 from app.pipeline import run
 from app.pipeline import threads
 from app.result import is_error
@@ -32,7 +33,9 @@ type Command = Callable[[AbstractContext, argparse.Namespace], Awaitable[int]]
 logger = logging.get_logger(__name__)
 
 _DIGEST_LIST_LIMIT = 20
-_PREVIEW_DIRECTORY = Path("data")
+_RUN_LIST_LIMIT = 20
+# The conventional exit status of a process stopped by SIGTERM.
+_EXIT_TERMINATED = 143
 
 
 async def _migrate(ctx: AbstractContext, args: argparse.Namespace) -> int:
@@ -58,25 +61,13 @@ async def _seed(ctx: AbstractContext, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _write_preview(html: str, date: str) -> Path:
-    path = _PREVIEW_DIRECTORY / f"digest-{date}.html"
-
-    def write() -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(html, encoding="utf-8")
-
-    await asyncio.to_thread(write)
-
-    return path
-
-
 async def _run(ctx: AbstractContext, args: argparse.Namespace) -> int:
     outcome = await run.run_pipeline(
         ctx, adapters=registry.ADAPTERS, force=args.force, dry_run=args.dry_run
     )
 
     if outcome.preview_html is not None:
-        path = await _write_preview(outcome.preview_html, f"{ctx.clock.now():%Y-%m-%d}")
+        path = await preview.write(outcome.preview_html, f"{ctx.clock.now():%Y-%m-%d}")
         print(f"dry run: preview written to {path}")
 
         return 0
@@ -241,15 +232,11 @@ async def _digests(ctx: AbstractContext, args: argparse.Namespace) -> int:
 
 
 async def _set_pinned(ctx: AbstractContext, thread_id: str, *, pinned: bool) -> int:
-    found = await ctx.threads.find_by_id(thread_id)
-
-    if is_error(found):
+    if is_error(await threads.set_pinned(ctx, thread_id, pinned=pinned)):
         print(f"no thread {thread_id}")
 
         return 1
 
-    query = feedback.pinned_query_for(found.title) if pinned else None
-    await ctx.threads.set_pinned(thread_id, pinned=pinned, query=query)
     print(f"thread {thread_id} {'pinned' if pinned else 'unpinned'}")
 
     return 0
@@ -271,35 +258,44 @@ async def _threads(ctx: AbstractContext, args: argparse.Namespace) -> int:
     return 0
 
 
-async def _maintain(ctx: AbstractContext, args: argparse.Namespace) -> int:
-    """Daily housekeeping, safe to run every hour: prunes, then backs up once a day."""
-    now = ctx.clock.now()
-    retention = timedelta(days=settings.RETENTION_DAYS)
-    pruned_items = await ctx.items.prune_before(now - retention)
-    pruned_runs = await ctx.runs.prune_before(now - 2 * retention)
-    backup = settings.BACKUP_DIRECTORY / f"aid-{now:%Y-%m-%d}.sqlite3"
-
-    if not await asyncio.to_thread(backup.exists):
-        await ctx.database.backup(backup)
-        removed = await asyncio.to_thread(_remove_old_backups)
-        print(f"backed up to {backup}; removed {removed} old backup(s)")
-
-    print(f"pruned {pruned_items} item(s) and {pruned_runs} run record(s)")
+async def _runs(ctx: AbstractContext, args: argparse.Namespace) -> int:
+    for record in await ctx.runs.list_recent(limit=_RUN_LIST_LIMIT):
+        finished = (
+            "running" if record.finished_at is None else f"{record.finished_at:%H:%M}"
+        )
+        print(
+            f"{record.started_at:%Y-%m-%d %H:%M} -> {finished:<7} "
+            f"{record.outcome or '-':<9} {record.stage:<9} {record.detail or ''}"
+        )
 
     return 0
 
 
-def _remove_old_backups() -> int:
-    backups = sorted(settings.BACKUP_DIRECTORY.glob("aid-*.sqlite3"))
-    old = backups[: max(0, len(backups) - settings.BACKUPS_KEPT)]
+async def _maintain(ctx: AbstractContext, args: argparse.Namespace) -> int:
+    outcome = await maintain.maintain(ctx, backup_directory=settings.BACKUP_DIRECTORY)
 
-    for path in old:
-        path.unlink()
+    if outcome.backup is not None:
+        print(
+            f"backed up to {outcome.backup}; "
+            f"removed {outcome.removed_backups} old backup(s)"
+        )
 
-    return len(old)
+    print(
+        f"pruned {outcome.pruned_items} item(s) and {outcome.pruned_runs} run record(s)"
+    )
+
+    return 0
 
 
 async def _execute(command: Command, args: argparse.Namespace) -> int:
+    # NOTE: `docker stop` sends SIGTERM, which asyncio does not turn into a
+    # cancellation by itself. Cancelling here lets a stopped run record itself as
+    # cancelled and release the lease instead of blocking the next run until it expires.
+    task = asyncio.current_task()
+
+    if task is not None:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
+
     ctx = context.default()
 
     try:
@@ -334,7 +330,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pref_actions = prefs.add_subparsers(dest="action", required=True)
     pref_actions.add_parser("show")
     pref_actions.add_parser("set-email").add_argument("value")
-    pref_actions.add_parser("set-hour").add_argument("value", type=int)
+    pref_actions.add_parser("set-hour").add_argument(
+        "value", type=int, choices=range(24), metavar="HOUR"
+    )
     pref_actions.add_parser("set-style").add_argument(
         "value", choices=[style.value for style in DigestStyle]
     )
@@ -357,6 +355,8 @@ def _build_parser() -> argparse.ArgumentParser:
     keyword.add_argument("--exclude", action="store_true")
     digests = commands.add_parser("digests", help="list recent digests")
     digests.add_subparsers(dest="action", required=True).add_parser("list")
+    runs = commands.add_parser("runs", help="list recent pipeline runs")
+    runs.add_subparsers(dest="action", required=True).add_parser("list")
     threads_parser = commands.add_parser("threads", help="list or pin threads")
     thread_actions = threads_parser.add_subparsers(dest="action", required=True)
     thread_actions.add_parser("list")
@@ -378,6 +378,7 @@ _COMMANDS: dict[str, Command] = {
     "sources": _sources,
     "prefs": _prefs,
     "digests": _digests,
+    "runs": _runs,
     "threads": _threads,
     "maintain": _maintain,
 }
@@ -398,7 +399,10 @@ def main() -> None:
         print(f"unknown command: {args.command}")
         sys.exit(1)
 
-    code = asyncio.run(_execute(command, args))
+    try:
+        code = asyncio.run(_execute(command, args))
+    except asyncio.CancelledError:
+        sys.exit(_EXIT_TERMINATED)
 
     if code != 0:
         sys.exit(code)

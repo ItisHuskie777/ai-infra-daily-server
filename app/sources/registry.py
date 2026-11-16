@@ -1,3 +1,4 @@
+from app import settings
 from app.sources._common import ImplementsSourceAdapter
 from app.sources.bluesky import BlueskyAdapter
 from app.sources.hn import HackerNewsAdapter
@@ -15,7 +16,7 @@ ADAPTERS: dict[str, ImplementsSourceAdapter] = {
         RedditAdapter(),
         BlueskyAdapter(),
         YoutubeAdapter(),
-        XiaohongshuAdapter(),
-        XAdapter(),
+        XiaohongshuAdapter(cookie=settings.XIAOHONGSHU_COOKIE),
+        XAdapter(cookie=settings.X_COOKIE),
     )
 }

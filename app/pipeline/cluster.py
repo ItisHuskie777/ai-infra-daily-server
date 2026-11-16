@@ -5,15 +5,15 @@ import numpy
 
 from app import logging
 from app import settings
-from app.adapters.embeddings import Vector
 from app.context import AbstractContext
 from app.models import Event
 from app.models import EventWithItems
 from app.models import Model
 from app.models import SourceCategory
 from app.models import StoredItem
-from app.repositories.items import EmbeddedItem
+from app.repositories import EmbeddedItem
 from app.result import is_error
+from app.vectors import Vector
 
 logger = logging.get_logger(__name__)
 
@@ -178,7 +178,6 @@ async def _create_event_for(
         id=event_id,
         thread_id=None,
         title=item.title,
-        summary="",
         created_at=now,
         updated_at=now,
         centroid_item_id=item.id,

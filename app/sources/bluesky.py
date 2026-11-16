@@ -103,15 +103,6 @@ class BlueskyAdapter(ImplementsSourceAdapter):
         return "bluesky"
 
     @override
-    def precheck(self, ctx: AbstractContext, source: Source) -> FetchError | None:
-        if not isinstance(source.config, BlueskyConfig):
-            return FetchError.UNSUPPORTED
-
-        url = _feed_url(source.config)
-
-        return url if isinstance(url, FetchError) else None
-
-    @override
     async def fetch(
         self, ctx: AbstractContext, source: Source
     ) -> OnSuccess[list[SourceItem]]:

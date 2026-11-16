@@ -7,10 +7,33 @@ set -eu
 aid migrate
 aid seed
 
+# `docker stop` signals this shell, not the command it is waiting for. Every command
+# therefore runs in the background and the signal is passed on, so a run that is
+# stopped half way records itself as cancelled and releases its lease.
+child=""
+
+stop() {
+    if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null || true
+        wait "$child" || true
+    fi
+
+    exit 143
+}
+
+trap stop TERM INT
+
+# A failed hour is logged and the loop carries on; the next hour retries.
+attempt() {
+    "$@" &
+    child=$!
+    wait "$child" || echo "$* exited with status $?"
+    child=""
+}
+
 while true; do
     now=$(date +%s)
-    sleep $((3600 - now % 3600))
-    # A failed hour is logged and the loop carries on; the next hour retries.
-    aid maintain || echo "aid maintain exited with status $?"
-    aid run || echo "aid run exited with status $?"
+    attempt sleep $((3600 - now % 3600))
+    attempt aid maintain
+    attempt aid run
 done
