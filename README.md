@@ -35,37 +35,52 @@ and operations are in [`docs/deployment.md`](docs/deployment.md).
 ### Overall system
 
 ```mermaid
-graph TB
-    OWNER["Owner<br/>terminal or curl"]
-    LOOP["scheduler service<br/>deploy/scheduler.sh, every hour:<br/>aid maintain, aid run"]
-    API["api service (aid serve, FastAPI)<br/>public: /feedback, /quiz, /api/health<br/>owner API under /api, bearer token"]
-    PIPELINE["Pipeline run (app/pipeline/run.py)<br/>fetch, ingest, embed, cluster, threads, rank,<br/>select, review, summarise, compose, deliver"]
-    EMBEDDER["fastembed<br/>BAAI/bge-m3, local ONNX"]
-    DB[("SQLite (data/aid.sqlite3)<br/>sources, items, events, threads,<br/>digests, feedback, preferences, runs")]
-    SOURCES["Sources<br/>feeds and public APIs over HTTP,<br/>Xiaohongshu and X through Chromium"]
-    LLM["DeepSeek API<br/>ranking, review, summaries"]
-    RESEND["Resend API<br/>email delivery"]
-    INBOX["Owner's inbox<br/>the daily digest"]
+flowchart LR
+    OWNER(["<b>Owner</b><br/>terminal or curl"])
+
+    subgraph SERVER["Linux server"]
+        LOOP("<b>scheduler service</b><br/>every hour:<br/>aid maintain, aid run")
+        API("<b>api service</b><br/>/feedback, /quiz,<br/>/api/health, owner API<br/>with bearer token")
+        PIPELINE("<b>Pipeline run</b><br/>fetch → ingest → embed<br/>→ cluster → threads<br/>→ rank → select<br/>→ review → summarise<br/>→ compose → deliver")
+        EMBEDDER("<b>fastembed</b><br/>BAAI/bge-m3, local ONNX")
+        DB[("<b>SQLite</b><br/>sources, items, events,<br/>threads, digests, feedback,<br/>preferences, runs")]
+    end
+
+    subgraph EXTERNAL["External services"]
+        SOURCES("<b>Sources</b><br/>feeds and public APIs,<br/>Xiaohongshu and X<br/>through Chromium")
+        LLM("<b>DeepSeek API</b><br/>ranking, review,<br/>summaries")
+        RESEND("<b>Resend API</b><br/>email delivery")
+    end
+
+    INBOX(["<b>Owner's inbox</b><br/>the daily digest"])
 
     OWNER -->|"owner API"| API
     API -->|"POST /api/runs"| PIPELINE
     LOOP -->|"starts"| PIPELINE
+    PIPELINE -->|"embed"| EMBEDDER
     PIPELINE -->|"fetch"| SOURCES
-    PIPELINE -->|"embed items"| EMBEDDER
     PIPELINE -->|"JSON prompts"| LLM
     PIPELINE -->|"send"| RESEND
-    PIPELINE <--->|"read/write"| DB
-    API <--->|"read/write"| DB
+    PIPELINE <-->|"read / write"| DB
+    API <-->|"read / write"| DB
     RESEND --> INBOX
     INBOX -.->|"quiz and feedback links"| API
 
-    classDef outside stroke-dasharray: 6 4
-    class OWNER,SOURCES,LLM,RESEND,INBOX outside
+    classDef person fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1.5px
+    classDef service fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1.5px
+    classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1.5px
+    classDef outside fill:#f3e8ff,stroke:#9333ea,color:#581c87,stroke-width:1.5px
+    class OWNER,INBOX person
+    class LOOP,API,PIPELINE,EMBEDDER service
+    class DB store
+    class SOURCES,LLM,RESEND outside
+    style SERVER fill:transparent,stroke:#2563eb,stroke-dasharray:6 4
+    style EXTERNAL fill:transparent,stroke:#9333ea,stroke-dasharray:6 4
 ```
 
-Solid boxes run on the server and dashed boxes are outside it. The `scheduler` and `api`
-services are two containers of one Docker image. They share the SQLite file, the
-embedding model cache and the dry-run previews through the `./data` directory.
+Blue boxes run on the server and purple boxes are external services. The `scheduler`
+and `api` services are two Docker Compose containers of one image. They share the SQLite
+file, the embedding model cache and the dry-run previews through the `./data` directory.
 
 A pipeline run is started by the scheduler every hour or by `POST /api/runs`. A lease in
 the database lets only one run work at a time. The dotted line is the feedback loop:
@@ -76,40 +91,59 @@ weights that the next run ranks with.
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant SCHED as Scheduler
     participant RUN as Pipeline run
     participant DB as SQLite
     participant SRC as Sources
     participant LLM as DeepSeek
     participant MAIL as Resend
-    participant OWNER as Owner
+    actor OWNER as Owner
 
     SCHED->>RUN: aid run (every hour)
     RUN->>DB: Run lease, profile
     DB-->>RUN: Due now, not sent today
-    RUN->>SRC: Fetch enabled sources
-    SRC-->>RUN: Items and source health
-    RUN->>DB: Store new items
-    RUN->>RUN: Embed new items (bge-m3, local)
-    RUN->>DB: Events and threads
-    RUN->>LLM: Score and tag events
-    LLM-->>RUN: Relevance and topics
-    RUN->>RUN: Select per category
-    RUN->>LLM: Review the selection
-    LLM-->>RUN: Entries to merge or drop
-    RUN->>LLM: Summarise each event
-    LLM-->>RUN: Headline and summary
-    RUN->>DB: Save the digest as pending
-    RUN->>MAIL: POST /emails
-    MAIL-->>OWNER: Digest delivered
-    RUN->>DB: Mark the digest sent
+
+    rect rgba(37, 99, 235, 0.12)
+        Note over RUN,SRC: Collect
+        RUN->>SRC: Fetch enabled sources
+        SRC-->>RUN: Items and source health
+        RUN->>DB: Store new items
+        RUN->>RUN: Embed new items (bge-m3, local)
+    end
+
+    rect rgba(22, 163, 74, 0.12)
+        Note over RUN,DB: Group
+        RUN->>DB: Events and threads
+    end
+
+    rect rgba(217, 119, 6, 0.12)
+        Note over RUN,LLM: Choose
+        RUN->>LLM: Score and tag events
+        LLM-->>RUN: Relevance and topics
+        RUN->>RUN: Select per category
+        RUN->>LLM: Review the selection
+        LLM-->>RUN: Entries to merge or drop
+    end
+
+    rect rgba(147, 51, 234, 0.12)
+        Note over RUN,OWNER: Write and send
+        RUN->>LLM: Summarise each event
+        LLM-->>RUN: Headline and summary
+        RUN->>DB: Save the digest as pending
+        RUN->>MAIL: POST /emails
+        MAIL-->>OWNER: Digest delivered
+        RUN->>DB: Mark the digest sent
+    end
+
     OWNER->>DB: Quiz answers update the weights (HTTP API)
 ```
 
-The scheduler starts `aid run` at the top of every hour. The run stops at once unless
-the owner's delivery hour has come and no digest went out that day, so one digest is
-sent per local day. The digest is saved before it is sent, so a failed delivery is
-retried the next hour with the same digest and without another round of model calls.
+The coloured bands are the four groups of stages. The scheduler starts `aid run` at the
+top of every hour. The run stops at once unless the owner's delivery hour has come and
+no digest went out that day, so one digest is sent per local day. The digest is saved
+before it is sent, so a failed delivery is retried the next hour with the same digest
+and without another round of model calls.
 
 ### Code layers
 
@@ -117,38 +151,53 @@ retried the next hour with the same digest and without another round of model ca
 flowchart TB
     subgraph ENTRY["Entry points"]
         direction TB
-        CLICMD["cli.py<br/>the aid command"]
-        HTTPAPI["api/<br/>FastAPI app, bearer auth, routes"]
+        CLICMD("<b>cli.py</b><br/>the aid command")
+        HTTPAPI("<b>api/</b><br/>FastAPI app, bearer auth, routes")
     end
 
     subgraph LOGIC["Logic"]
         direction TB
-        PIPELINE["pipeline/<br/>one module per stage"]
-        SOURCEKINDS["sources/<br/>one adapter per source kind"]
+        PIPELINE("<b>pipeline/</b><br/>one module per stage")
+        SOURCEKINDS("<b>sources/</b><br/>one adapter per source kind")
     end
 
-    CONTEXT["context.py<br/>AbstractContext, handed to every stage"]
+    CONTEXT("<b>context.py</b><br/>AbstractContext, handed to every stage")
 
     subgraph EDGE["Access to the outside"]
         direction TB
-        REPOSITORIES["repositories/<br/>all SQL, one class per resource"]
-        ADAPTERS["adapters/<br/>one wrapper per external system"]
+        REPOSITORIES("<b>repositories/</b><br/>all SQL, one class per resource")
+        ADAPTERS("<b>adapters/</b><br/>one wrapper per external system")
     end
 
     subgraph EXTERNAL["External systems"]
         direction TB
-        SQLITE[("SQLite<br/>database.py")]
-        WEB["Feeds and APIs<br/>http.py"]
-        DEEPSEEK["DeepSeek<br/>llm.py"]
-        FASTEMBED["fastembed<br/>embeddings.py"]
-        CHROMIUM["Chromium<br/>browser.py"]
-        MAIL["Resend<br/>email.py"]
+        SQLITE[("<b>SQLite</b><br/>database.py")]
+        WEB("<b>Feeds and APIs</b><br/>http.py")
+        DEEPSEEK("<b>DeepSeek</b><br/>llm.py")
+        FASTEMBED("<b>fastembed</b><br/>embeddings.py")
+        CHROMIUM("<b>Chromium</b><br/>browser.py")
+        MAIL("<b>Resend</b><br/>email.py")
     end
 
     ENTRY --> LOGIC
     LOGIC --> CONTEXT
     CONTEXT --> EDGE
     EDGE --> EXTERNAL
+
+    classDef entry fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1.5px
+    classDef logic fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1.5px
+    classDef context fill:#e0e7ff,stroke:#4f46e5,color:#312e81,stroke-width:1.5px
+    classDef edge fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1.5px
+    classDef outside fill:#f3e8ff,stroke:#9333ea,color:#581c87,stroke-width:1.5px
+    class CLICMD,HTTPAPI entry
+    class PIPELINE,SOURCEKINDS logic
+    class CONTEXT context
+    class REPOSITORIES,ADAPTERS edge
+    class SQLITE,WEB,DEEPSEEK,FASTEMBED,CHROMIUM,MAIL outside
+    style ENTRY fill:transparent,stroke:#d97706,stroke-dasharray:6 4
+    style LOGIC fill:transparent,stroke:#2563eb,stroke-dasharray:6 4
+    style EDGE fill:transparent,stroke:#16a34a,stroke-dasharray:6 4
+    style EXTERNAL fill:transparent,stroke:#9333ea,stroke-dasharray:6 4
 ```
 
 Dependencies point one way, from the top of the diagram to the bottom. The file under
@@ -433,7 +482,7 @@ The two preference documents:
 profile = {
     "email": str,
     "timezone": str,
-    "delivery_hour": int,              # 0 to 23
+    "delivery_hour": int,  # 0 to 23
     "digest_style": "brief" | "balanced" | "deep",
 }
 interests = {
@@ -444,7 +493,7 @@ interests = {
     "preferred_sources": [str],
     "blocked_sources": [str],
     "technical_depth": "high-level" | "practical" | "deep",
-    "topic_weights": {topic: float},   # learned; a missing topic counts as 1.0
+    "topic_weights": {topic: float},  # learned; a missing topic counts as 1.0
 }
 ```
 
