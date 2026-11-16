@@ -18,7 +18,7 @@ _KIND_ORDER = {
     ItemKind.COMMENTARY: 2,
     ItemKind.DISCUSSION: 3,
 }
-_VOICE_KINDS = frozenset({ItemKind.COMMENTARY, ItemKind.DISCUSSION})
+_VOICE_KINDS = frozenset({ItemKind.COMMENTARY})
 _SECTION_OF_TOPIC: dict[Topic, DigestSection] = {
     Topic.MODELS: DigestSection.MODELS,
     Topic.OPEN_SOURCE: DigestSection.MODELS,
@@ -40,6 +40,7 @@ class _Candidate(Model):
     items: tuple[StoredItem, ...]
     section: DigestSection
     has_voice: bool
+    community_only: bool
 
 
 def engagement_value(item: StoredItem) -> int:
@@ -75,17 +76,29 @@ def section_for(topics: Sequence[Topic]) -> DigestSection:
 _REPORT_KINDS = frozenset({ItemKind.PRIMARY, ItemKind.MEDIA})
 
 
+def title_key(title: str) -> str:
+    """Letters and digits only, lower case: the same headline published again under a
+    new address has the same key."""
+    return "".join(character for character in title.lower() if character.isalnum())
+
+
 def fresh_events(
-    events: Sequence[EventWithItems], already_sent_item_ids: set[str]
+    events: Sequence[EventWithItems],
+    already_sent_item_ids: set[str],
+    sent_title_keys: set[str],
 ) -> list[EventWithItems]:
-    """Events reduced to their unsent items (FR2.2). An event that was partly sent
-    before is a follow-up and returns only with enough new material: a new primary or
-    media report, or several new items; a single repost does not bring a story back."""
+    """Events reduced to their unsent items (FR2.2); an item whose headline was already
+    sent counts as sent. An event that was partly sent before is a follow-up and
+    returns only with enough new material: a new primary or media report, or several
+    new items; a single repost does not bring a story back."""
     fresh: list[EventWithItems] = []
 
     for event in events:
         unsent = tuple(
-            item for item in event.items if item.id not in already_sent_item_ids
+            item
+            for item in event.items
+            if item.id not in already_sent_item_ids
+            and title_key(item.title) not in sent_title_keys
         )
 
         if len(unsent) == 0:
@@ -102,6 +115,24 @@ def fresh_events(
         fresh.append(event.model_copy(update={"items": unsent}))
 
     return fresh
+
+
+def _limit_community(candidates: Sequence[_Candidate], limit: int) -> list[_Candidate]:
+    """Keeps at most `limit` events that only forum threads cover (Reddit, Hacker
+    News), so a category is not filled with questions and opinion posts."""
+    kept: list[_Candidate] = []
+    community = 0
+
+    for candidate in candidates:
+        if candidate.community_only:
+            if community == limit:
+                continue
+
+            community += 1
+
+        kept.append(candidate)
+
+    return kept
 
 
 def _by_section(
@@ -135,6 +166,7 @@ def _to_candidate(
         items=tuple(items),
         section=section_for(event.topics),
         has_voice=any(item.kind in _VOICE_KINDS for item in items),
+        community_only=all(item.kind is ItemKind.DISCUSSION for item in items),
     )
 
 
@@ -178,12 +210,14 @@ def select_for_digest(
     style: DigestStyle,
     already_sent_item_ids: set[str],
     pinned_thread_ids: set[str],
+    spare: int = 0,
 ) -> list[DigestEventPlacement]:
     """Pure assignment of ranked events to digest categories: each category gets its
-    best events up to the style's per-category budget, so no single category fills
-    the digest (FR5.6); off-topic events below the minimum score are left out. Items
-    already sent are removed first, so an event with nothing new is dropped entirely
-    (FR2.2, FR5.2)."""
+    best events up to the style's per-category budget plus `spare`, so no single
+    category fills the digest (FR5.6) and the editor review has room to merge and
+    drop stories before `trim_to_budget`. Off-topic events below the minimum score are
+    left out. Items already sent are removed first, so an event with nothing new is
+    dropped entirely (FR2.2, FR5.2)."""
     candidates = [
         candidate
         for rank, event in enumerate(ranked)
@@ -201,28 +235,52 @@ def select_for_digest(
             candidate
             for queue in _by_section(candidates).values()
             for candidate in _pick_with_voice_share(
-                queue,
-                limit=settings.DIGEST_EVENTS_PER_CATEGORY[style],
+                _limit_community(queue, settings.COMMUNITY_EVENTS_PER_CATEGORY),
+                limit=settings.DIGEST_EVENTS_PER_CATEGORY[style] + spare,
                 pinned_thread_ids=pinned_thread_ids,
             )
         ),
         key=lambda candidate: candidate.rank,
     )
 
-    positions: dict[DigestSection, int] = {}
-    placements: list[DigestEventPlacement] = []
-
-    for candidate in chosen:
-        position = positions.get(candidate.section, 0)
-        positions[candidate.section] = position + 1
-
-        placements.append(
+    return _numbered(
+        [
             DigestEventPlacement(
                 event=candidate.event,
                 section=candidate.section,
-                position=position,
+                position=0,
                 item_ids=tuple(item.id for item in candidate.items),
             )
-        )
+            for candidate in chosen
+        ]
+    )
 
-    return placements
+
+def _numbered(placements: Sequence[DigestEventPlacement]) -> list[DigestEventPlacement]:
+    positions: dict[DigestSection, int] = {}
+    numbered: list[DigestEventPlacement] = []
+
+    for placement in placements:
+        position = positions.get(placement.section, 0)
+        positions[placement.section] = position + 1
+        numbered.append(placement.model_copy(update={"position": position}))
+
+    return numbered
+
+
+def trim_to_budget(
+    placements: Sequence[DigestEventPlacement], *, style: DigestStyle
+) -> list[DigestEventPlacement]:
+    """Cuts each category back to the style's budget, keeping the order given."""
+    budget = settings.DIGEST_EVENTS_PER_CATEGORY[style]
+    counts: dict[DigestSection, int] = {}
+    kept: list[DigestEventPlacement] = []
+
+    for placement in placements:
+        count = counts.get(placement.section, 0)
+
+        if count < budget:
+            kept.append(placement)
+            counts[placement.section] = count + 1
+
+    return _numbered(kept)

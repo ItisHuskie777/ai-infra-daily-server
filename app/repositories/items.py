@@ -71,6 +71,10 @@ class ImplementsItemRepository(ABC):
         """Ids among `ids` that appeared in a digest that was sent (FR2.2)."""
 
     @abstractmethod
+    async def sent_titles_since(self, since: datetime) -> list[str]:
+        """Titles of items in digests sent since `since`."""
+
+    @abstractmethod
     async def prune_before(self, published_before: datetime) -> int:
         """Drops the bulky parts (text, comments, vector) of items too old to matter;
         the rows stay, so already-sent bookkeeping and references remain valid. An
@@ -232,6 +236,19 @@ class ItemRepository(ImplementsItemRepository):
             sent.update(str(row["item_id"]) for row in rows)
 
         return sent
+
+    @override
+    async def sent_titles_since(self, since: datetime) -> list[str]:
+        rows = await self._db.fetch_all(
+            "SELECT DISTINCT i.title FROM digest_events de "
+            "JOIN digests d ON d.id = de.digest_id, "
+            "json_each(de.item_ids_json) AS listed "
+            "JOIN items i ON i.id = listed.value "
+            "WHERE d.delivery_status = 'sent' AND d.created_at >= ?",
+            (to_iso(since),),
+        )
+
+        return [str(row["title"]) for row in rows]
 
     @override
     async def prune_before(self, published_before: datetime) -> int:

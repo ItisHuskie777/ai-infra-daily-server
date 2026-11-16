@@ -56,6 +56,7 @@ top-voted comments.
 - FR5.4 The ranking model also tags every event with one or two topics from a fixed taxonomy. The final recommendation score is the product of the model's relevance, the strongest source weight, the owner's learned weight for the event's topics, a boost for coverage by several independent sources, a freshness decay and a penalty for events with almost no body text.
 - FR5.5 An event that repeats a story already ranked higher (embedding similarity above a threshold) is held back, so the digest does not carry one story twice.
 - FR5.6 The digest is organised by category (models, research, infrastructure, agents and tools, business and products, policy and safety, other), taken from each event's main topic. Every category gets its best events up to a per-category budget (10, 15 or 20 by digest style), so no single category fills the digest; a category with less news shows what it has.
+- FR5.7 Before the email is composed, one editor pass over the selection merges entries that report the same story (including the same news in English and Chinese) and drops stories that only repeat what was sent in the last few days. At most three entries per category may come from forum threads alone (Reddit, Hacker News).
 
 ### FR6 Summarisation and digest composition
 
@@ -63,6 +64,7 @@ top-voted comments.
 - FR6.2 Digest style (brief, balanced, deep) controls the summary length and the number of events per category.
 - FR6.3 The email is grouped by category (FR5.6); a story that has run for more than one day carries a "Day N of this story" badge.
 - FR6.4 Each event is summarised in the language of its sources: English sources in English, Chinese sources in Chinese, any other language in English; quotes stay in their original language.
+- FR6.5 Headlines and summaries follow the owner's humanizer guide: sentence-case headlines that state what happened, summaries that name who did what and add facts beyond the headline, no dashes, no stock AI phrasing, and no description of the article instead of the news.
 
 ### FR7 Delivery and interaction
 

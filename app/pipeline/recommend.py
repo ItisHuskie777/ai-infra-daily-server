@@ -36,12 +36,15 @@ TOPIC_DESCRIPTIONS: dict[Topic, str] = {
     Topic.HARDWARE: "chips, accelerators, clusters and data centres",
     Topic.TRAINING: "training and fine-tuning methods, data and recipes",
     Topic.AGENTS: "agents, agent frameworks and how they are built or evaluated",
-    Topic.TOOLING: "libraries, SDKs and developer tools",
-    Topic.RESEARCH: "papers and scientific findings",
+    Topic.TOOLING: "libraries, SDKs and tools for people who build with AI",
+    Topic.RESEARCH: "papers, preprints and benchmark studies, whatever their subject",
     Topic.OPEN_SOURCE: "open-weight model ecosystems and licences",
-    Topic.POLICY: "safety, regulation, politics and public debate",
+    Topic.POLICY: (
+        "safety, security incidents, data leaks, regulation, lawsuits, politics "
+        "and public debate"
+    ),
     Topic.BUSINESS: "companies, funding, deals, hiring and market moves",
-    Topic.PRODUCTS: "consumer and enterprise products built on models",
+    Topic.PRODUCTS: "apps and features that end users use, built on models",
 }
 
 

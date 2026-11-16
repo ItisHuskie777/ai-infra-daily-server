@@ -19,6 +19,7 @@ from app.models import RunStatus
 from app.models import SourceHealth
 from app.pipeline import cluster
 from app.pipeline import compose
+from app.pipeline import edit
 from app.pipeline import embed
 from app.pipeline import feedback_token
 from app.pipeline import ingest
@@ -130,8 +131,12 @@ async def _rank_and_select(
     item_ids = [item.id for event in events for item in event.items]
     already_sent = await ctx.items.filter_already_sent(item_ids)
     sources = await ctx.sources.list_all()
+    recent_titles = await ctx.items.sent_titles_since(
+        now - timedelta(days=settings.REPEAT_LOOKBACK_DAYS)
+    )
+    sent_keys = {select.title_key(title) for title in recent_titles}
     ranked = await rank.rank_events(
-        ctx, interests, sources, select.fresh_events(events, already_sent)
+        ctx, interests, sources, select.fresh_events(events, already_sent, sent_keys)
     )
 
     if is_error(ranked):
@@ -142,12 +147,17 @@ async def _rank_and_select(
     await ctx.runs.set_stage(run_id, "select")
     pinned = await ctx.threads.list_pinned(since=threads.inactive_since(now))
 
-    return select.select_for_digest(
+    selected = select.select_for_digest(
         ranked,
         style=profile.digest_style,
         already_sent_item_ids=already_sent,
         pinned_thread_ids={thread.id for thread in pinned},
+        spare=settings.EDITOR_SPARE_PER_CATEGORY,
     )
+    await ctx.runs.set_stage(run_id, "review")
+    reviewed = await edit.review(ctx, selected, recent_titles=recent_titles)
+
+    return select.trim_to_budget(reviewed, style=profile.digest_style)
 
 
 async def _summarise_all(
@@ -215,7 +225,6 @@ def _build_digest(
 
     composed = compose.compose_digest_html(
         date=date,
-        style=profile.digest_style,
         sections=sections,
         health=health,
         feedback_base_url=settings.PUBLIC_BASE_URL,

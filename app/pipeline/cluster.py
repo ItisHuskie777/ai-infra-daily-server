@@ -1,3 +1,4 @@
+from datetime import datetime
 from datetime import timedelta
 
 import numpy
@@ -33,9 +34,15 @@ class _Window:
     """Every embedded item of the event window as one matrix, with the event each row
     belongs to; rows are assigned as the run places items."""
 
-    __slots__ = ("event_of", "items", "matrix", "origins")
+    __slots__ = ("closed", "event_of", "items", "matrix", "origins")
 
-    def __init__(self, embedded: list[EmbeddedItem], paper_sources: set[str]) -> None:
+    def __init__(
+        self,
+        embedded: list[EmbeddedItem],
+        paper_sources: set[str],
+        closed_events: set[str],
+    ) -> None:
+        self.closed = closed_events
         self.items = [entry.item for entry in embedded]
         self.event_of: list[str | None] = [entry.item.event_id for entry in embedded]
         # NOTE: All paper feeds count as one origin: cross-listed abstracts of one field
@@ -70,7 +77,10 @@ class _Window:
             settings.EVENT_SIMILARITY_THRESHOLD,
         )
         eligible = numpy.fromiter(
-            (event_id is not None for event_id in self.event_of),
+            (
+                event_id is not None and event_id not in self.closed
+                for event_id in self.event_of
+            ),
             dtype=numpy.bool_,
             count=len(self.event_of),
         )
@@ -229,17 +239,32 @@ async def _persist(ctx: AbstractContext, state: _RunState) -> None:
         await ctx.items.assign_event(item_ids, event_id)
 
 
+async def _closed_events(
+    ctx: AbstractContext, embedded: list[EmbeddedItem], *, now: datetime
+) -> set[str]:
+    """Events created more than EVENT_OPEN_HOURS ago take no new items."""
+    event_ids = list({entry.item.event_id for entry in embedded if entry.item.event_id})
+    created = await ctx.events.creation_times(event_ids)
+    cutoff = now - timedelta(hours=settings.EVENT_OPEN_HOURS)
+
+    return {event_id for event_id, at in created.items() if at < cutoff}
+
+
 async def cluster_recent_items(ctx: AbstractContext) -> ClusterOutcome:
     """Groups every unclustered embedded item of the event window into events by
     vector similarity (FR3.1); the event keeps its centroid item's title until it is
     summarised."""
-    window_start = ctx.clock.now() - timedelta(hours=settings.EVENT_WINDOW_HOURS)
+    now = ctx.clock.now()
+    window_start = now - timedelta(hours=settings.EVENT_WINDOW_HOURS)
     paper_sources = {
         source.id
         for source in await ctx.sources.list_all()
         if source.category == SourceCategory.PAPER
     }
-    window = _Window(await ctx.items.list_embedded_since(window_start), paper_sources)
+    embedded = await ctx.items.list_embedded_since(window_start)
+    window = _Window(
+        embedded, paper_sources, await _closed_events(ctx, embedded, now=now)
+    )
     state = _RunState()
     rows = window.pending_rows()
 

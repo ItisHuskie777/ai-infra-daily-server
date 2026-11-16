@@ -16,6 +16,7 @@ from app.models import EventWithItems
 from app.models import Interests
 from app.models import RankedEvent
 from app.models import Source
+from app.models import SourceCategory
 from app.models import Thread
 from app.models import Topic
 from app.pipeline import _untrusted
@@ -37,7 +38,10 @@ _RANK_SYSTEM_PROMPT = (
     "one-sentence rationale. Use the whole range: most events deserve less than 0.6 "
     "and only a few per batch more than 0.8. Where the profile is sparse, judge by "
     "how much the event matters to a practitioner who follows AI models, "
-    "infrastructure and tooling. Also tag each event with one or two topics from the "
+    "infrastructure and tooling. Forum posts that only ask a question, give an "
+    "opinion, show off a personal setup or ask for help carry no news; score them "
+    "below 0.3 unless the discussion reports something new. "
+    "Also tag each event with one or two topics from the "
     "list given, using the topic keys exactly; put first the topic that says what "
     "kind of news the event is, since it decides the event's category. "
     + _untrusted.RULE
@@ -324,6 +328,20 @@ async def _score_all(
     return scores
 
 
+def _with_paper_topic(
+    event: EventWithItems, topics: tuple[Topic, ...], paper_sources: set[str]
+) -> tuple[Topic, ...]:
+    """An event reported only by paper feeds is filed under research, whatever the
+    paper is about."""
+    if not all(item.source_id in paper_sources for item in event.items):
+        return topics
+
+    return (
+        Topic.RESEARCH,
+        *(topic for topic in topics if topic is not Topic.RESEARCH),
+    )[:_MAX_TOPICS_PER_EVENT]
+
+
 def _without_blocked(
     events: Sequence[EventWithItems], blocked: set[str]
 ) -> list[EventWithItems]:
@@ -397,6 +415,13 @@ async def rank_events(
         return []
 
     scores = await _score_all(ctx, interests, eligible, sources_by_id)
+    paper_sources = {
+        source.id for source in sources if source.category is SourceCategory.PAPER
+    }
+    topics = {
+        event.id: _with_paper_topic(event, scores[event.id].topics, paper_sources)
+        for event in eligible
+    }
 
     threads = await _load_threads(ctx, eligible)
     now = ctx.clock.now()
@@ -408,7 +433,7 @@ async def rank_events(
                 recommend.signals_for(
                     event,
                     relevance=scores[event.id].relevance,
-                    topics=scores[event.id].topics,
+                    topics=topics[event.id],
                     sources=sources_by_id,
                     now=now,
                 ),
@@ -416,7 +441,7 @@ async def rank_events(
             ),
             rationale=scores[event.id].rationale,
             thread=None if event.thread_id is None else threads.get(event.thread_id),
-            topics=scores[event.id].topics,
+            topics=topics[event.id],
         )
         for event in eligible
     ]

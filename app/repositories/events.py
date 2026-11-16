@@ -32,6 +32,9 @@ class ImplementsEventRepository(ABC):
     async def save_scores(self, scores: Mapping[str, EventScore]) -> None: ...
 
     @abstractmethod
+    async def creation_times(self, event_ids: Sequence[str]) -> dict[str, datetime]: ...
+
+    @abstractmethod
     async def find_by_id(self, event_id: str) -> OnSuccess[EventWithItems]: ...
 
     @abstractmethod
@@ -101,6 +104,19 @@ class EventRepository(ImplementsEventRepository):
             "UPDATE events SET score_json = ? WHERE id = ?",
             [(score.model_dump_json(), event_id) for event_id, score in scores.items()],
         )
+
+    @override
+    async def creation_times(self, event_ids: Sequence[str]) -> dict[str, datetime]:
+        if len(event_ids) == 0:
+            return {}
+
+        rows = await self._db.fetch_all(
+            "SELECT id, created_at FROM events "
+            f"WHERE id IN ({placeholders(len(event_ids))})",
+            tuple(event_ids),
+        )
+
+        return {str(row["id"]): from_iso(row["created_at"]) for row in rows}
 
     @override
     async def find_by_id(self, event_id: str) -> OnSuccess[EventWithItems]:

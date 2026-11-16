@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from collections.abc import Sequence
+from datetime import date as date_type
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -9,7 +10,6 @@ from jinja2 import FileSystemLoader
 from app import settings
 from app.models import DigestEventPlacement
 from app.models import DigestSection
-from app.models import DigestStyle
 from app.models import FeedbackSignal
 from app.models import ItemKind
 from app.models import Model
@@ -208,11 +208,18 @@ def _event_view(event: ComposedEvent, *, base_url: str, sign: LinkSigner) -> _Ev
     )
 
 
-def _subject_for(date: str, title: str | None) -> str:
-    if title is None:
-        return f"{_DIGEST_NAME} — {date}"
+def _date_label(date: str) -> str:
+    day = date_type.fromisoformat(date)
 
-    return f"{_DIGEST_NAME} — {date} — {title}"
+    return f"{day.day} {day:%B %Y}"
+
+
+def _subject_for(date: str, title: str | None) -> str:
+    """The lead story's headline goes in the subject, so the inbox shows the news."""
+    if title is None:
+        return f"{_DIGEST_NAME}, {_date_label(date)}"
+
+    return f"{_DIGEST_NAME}, {_date_label(date)}: {title}"
 
 
 def _quiz_view(quiz: Quiz, *, base_url: str, sign: LinkSigner) -> _QuizView:
@@ -242,7 +249,6 @@ def _quiz_view(quiz: Quiz, *, base_url: str, sign: LinkSigner) -> _QuizView:
 def compose_digest_html(
     *,
     date: str,
-    style: DigestStyle,
     sections: Sequence[ComposedSection],
     health: Sequence[SourceHealth],
     feedback_base_url: str,
@@ -274,8 +280,8 @@ def compose_digest_html(
     html = _ENVIRONMENT.get_template("digest.html.j2").render(
         digest_name=_DIGEST_NAME,
         subject=subject,
-        date=date,
-        style=style.value,
+        date_label=_date_label(date),
+        story_count=sum(len(view.events) for view in views),
         sections=views,
         quizzes=[
             _quiz_view(quiz, base_url=base_url, sign=sign_link) for quiz in quizzes

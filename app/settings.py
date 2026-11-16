@@ -40,6 +40,12 @@ SOURCE_FETCH_TIMEOUT_SECONDS = 15.0
 SOURCE_DEADLINE_SECONDS = 120.0
 MAX_RESPONSE_BYTES = 10_000_000
 EVENT_WINDOW_HOURS = 72
+# An event takes new items for this long after it was created; later reports start a
+# new event that the thread stage links to the story, instead of one event growing for
+# days under its first headline.
+EVENT_OPEN_HOURS = 36
+# How far back a headline counts as already sent, and the window the editor checks.
+REPEAT_LOOKBACK_DAYS = 7
 THREAD_INACTIVE_DAYS = 7
 # Calibrated on 374 real items embedded with BAAI/bge-m3: reports of one event from
 # different sources score 0.72 to 0.87, while two posts of one source or two papers
@@ -50,6 +56,10 @@ SAME_ORIGIN_SIMILARITY_THRESHOLD = 0.80
 THREAD_SIMILARITY_THRESHOLD = 0.72
 DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 INDIVIDUAL_VOICE_MIN_SHARE = 0.3
+# Events covered only by forum threads (Reddit, Hacker News) allowed per category.
+COMMUNITY_EVENTS_PER_CATEGORY = 3
+# Extra events per category the editor review may merge or drop before the cut.
+EDITOR_SPARE_PER_CATEGORY = 4
 # Recommendation score: relevance x source weight x the factors below.
 TOPIC_WEIGHT_STEP = 0.15
 SOURCE_WEIGHT_STEP_UP = 0.1

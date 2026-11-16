@@ -15,6 +15,7 @@ from app.models import Language
 from app.models import Model
 from app.models import StoredItem
 from app.models import TechnicalDepth
+from app.pipeline import _style
 from app.pipeline import _untrusted
 from app.result import OnSuccess
 from app.result import ServiceError
@@ -27,8 +28,9 @@ _MAX_COMMENTS_PER_ITEM = 8
 _MAX_TITLE_LENGTH = 200
 _WHITESPACE = re.compile(r"\s+")
 _SYSTEM_PROMPT = (
-    "You are a careful editor producing a neutral summary of one AI news event. "
-    + _untrusted.RULE
+    "You are the editor of a short daily AI-news email for one reader, a "
+    "practitioner who reads it in a few minutes. You write plain, factual "
+    "headlines and summaries. " + _untrusted.RULE
 )
 
 # Summary length targets in English words; Chinese targets are twice this in characters.
@@ -216,10 +218,15 @@ def _build_prompt(
     coverage_text = "\n".join(_describe_item(item) for item in coverage) or "(none)"
     voices_text = "\n".join(_describe_item(item) for item in voices) or "(none)"
 
+    # NOTE: The event keeps the title of its first item; a story that continues for
+    # days needs a headline from today's items, so the newest report leads.
+    newest = max(items, key=lambda item: item.published_at)
+
     return "\n".join(
         [
-            "Summarise one news event for a personal AI-infrastructure digest.",
-            f"Event title: {_untrusted.fence(placement.event.title)}",
+            "Summarise one news event for the digest. Write the headline about the "
+            "newest development in the items below.",
+            f"Newest report: {_untrusted.fence(newest.title)}",
             "",
             "Rules:",
             f"- Write the title, summary and key claims in {output_language}.",
@@ -237,6 +244,8 @@ def _build_prompt(
             f"- {_DEPTH_GUIDANCE[depth]}",
             f"- {_length_instruction(style, language)}",
             f"- {_extras_instruction(style, depth)}",
+            "",
+            _style.RULES_ZH if language is Language.ZH else _style.RULES_EN,
             "",
             "## Primary sources and media coverage",
             coverage_text,
@@ -371,8 +380,8 @@ async def summarise_event(
     claims = [claim.strip() for claim in generated.key_claims if claim.strip() != ""]
 
     return EventSummary(
-        title=generated.title.strip(),
-        summary=_cap_summary(generated.summary, style),
+        title=_style.tidy_headline(generated.title, language),
+        summary=_cap_summary(_style.tidy(generated.summary, language), style),
         key_claims=tuple(claims[: _max_key_claims(style)]),
         takes=tuple(takes[: _max_takes(depth)]),
         language=language,

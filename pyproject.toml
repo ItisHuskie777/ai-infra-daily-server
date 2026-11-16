@@ -56,6 +56,8 @@ known-first-party = ["app"]
 "app/__init__.py" = ["F401"]
 "app/**/__init__.py" = ["F401"]
 "app/cli.py" = ["T201"]
+# The Chinese writing rules are written with Chinese punctuation on purpose.
+"app/pipeline/_style.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.14"
