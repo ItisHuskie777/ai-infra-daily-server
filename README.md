@@ -58,6 +58,12 @@ category gets its best events up to a per-category budget (10, 15 or 20 by diges
 style), so no single one fills the digest. By default an event is a title and a short
 summary (`DIGEST_COMPACT` in `app/settings.py`).
 
+Before the email is composed, an editor pass (`app/pipeline/edit.py`) merges entries
+that report the same story and drops stories that only repeat the last few days.
+Headlines and summaries follow the house style in `app/pipeline/_style.py`, taken
+from the owner's humanizer guide: plain sentence-case headlines, summaries that name
+who did what, and no dashes or stock phrasing.
+
 ## Layout
 
 ```
